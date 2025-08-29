@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-patwatch.py — Regex-Zähler mit watch-Header, optionalem Zweitkommando (--auxcmd)
+patwatch.py — Regex-Zähler mit watch-Style-Header, optionalem Zweitkommando,
+Anti-Flackern-Ausgabe und vielfältigen Optionen.
 
-Pattern-Datei:  ID<TAB>LINE_REGEX<TAB>WORD_REGEX(optional)
+Pattern-Datei (Tab-getrennt):
+  ID<TAB>LINE_REGEX<TAB>WORD_REGEX(optional)
+
 Funktionen:
 - Zählt pro ID die Match-Zeilen
 - Extrahiert pro Match ein Wort: WORD_REGEX (1. Gruppe bevorzugt) oder letztes Wort der Zeile
-- Gibt "erste N" und "letzte M" Wörter ohne Überschneidung aus; Ellipse nur bei echter Lücke
-- Eingabe aus STDIN ODER via --cmd (inkl. Pipes); optional periodisch mit --interval
+- Gibt "erste N" (Head) und "letzte M" (Tail) Wörter ohne Überschneidung aus
+- Ellipse/Trenner nur, wenn eine echte Lücke zwischen Head und Tail existiert
+- Eingabe aus STDIN ODER via --cmd (inkl. Pipes)
+- Watch-artig periodisch via --interval
 - Optionaler Header (--clear/--color-header/--utc/--header)
 - STDERR-Unterdrückung mit --no-warn
-- NEU: --auxcmd → wird nach Hauptverarbeitung ausgeführt; STDOUT wird mit "###" angehängt
+- Zusatzkommando --auxcmd: wird NACH der Hauptverarbeitung ausgeführt, dessen STDOUT
+  wird mit einer "###"-Zeile angehängt
 """
 
 import sys, re, argparse, subprocess, time, shutil
@@ -39,13 +45,13 @@ def parse_args():
     p.add_argument("--no-warn", action="store_true",
                    help="Unterdrückt STDERR der Kommandos und interne Warnhinweise bei Exit≠0.")
     p.add_argument("--color-header", action="store_true",
-                   help="Farbiger Header: tmux-dunkelgrün (BG) + schwarzer Text.")
+                   help="Farbiger Header: tmux-dunkelgrün (BG 48;5;22) + schwarzer Text (30).")
 
     # Header-Extras
     p.add_argument("--utc", action="store_true", help="Timestamp im Header in UTC ausgeben.")
     p.add_argument("--header", default="", help="Custom-Headertext; erscheint oben rechts vor dem Timestamp.")
 
-    # NEU: Zusatzkommando
+    # Zusatzkommando
     p.add_argument("-a","--auxcmd", help="Zweites Shell-Kommando; dessen STDOUT wird mit '###' angehängt.")
     return p.parse_args()
 
@@ -189,7 +195,7 @@ def process_text(input_text: str, patterns: List[PatternRec], maxw: int, sep: st
         out_lines.append(f"{pat.pid}\t{total}\t{words}")
     return "\n".join(out_lines) + ("\n" if out_lines else "")
 
-# ---------- Kommando & Watch ----------
+# ---------- Kommando & Header/Watch ----------
 def run_cmd(cmd: str, shell_path: str, timeout: Optional[float], no_warn: bool) -> str:
     completed = subprocess.run(
         [shell_path, "-c", cmd],
@@ -203,12 +209,11 @@ def run_cmd(cmd: str, shell_path: str, timeout: Optional[float], no_warn: bool) 
         sys.stderr.write(f"[WARN] Kommando Exit {completed.returncode}: {completed.stderr}\n")
     return completed.stdout or ""
 
-def clear_screen():
-    sys.stdout.write("\x1b[H\x1b[2J"); sys.stdout.flush()
+def now_str(use_utc: bool) -> str:
+    fmt = "%a %b %d %H:%M:%S %Z %Y"
+    return time.strftime(fmt, time.gmtime() if use_utc else time.localtime())
 
-# statt render_header():
 def build_header_line(left: str, right: str, color: bool) -> str:
-    import shutil
     cols = shutil.get_terminal_size(fallback=(80, 24)).columns
     if len(left) + 1 + len(right) <= cols:
         spaces = cols - len(left) - len(right)
@@ -221,37 +226,9 @@ def build_header_line(left: str, right: str, color: bool) -> str:
         sep = " " if (cols - len(left) - len(right)) > 0 else ""
         line = left + sep + right
     if color:
+        # schwarzer Text (30) auf tmux-dunkelgrünem Hintergrund (48;5;22)
         return f"\x1b[30;48;5;22m{line.ljust(cols)}\x1b[0m\n"
     return line + "\n"
-
-
-def one_run():
-    # 1) Daten holen & verarbeiten (erst rechnen, NICHT clearn)
-    text = run_cmd(args.cmd, args.shell, args.timeout, args.no_warn) if args.cmd else sys.stdin.read()
-    main_out = process_text(text, patterns, args.maxw, sep, between, args.strip_punct)
-
-    # 2) Aux-Output ggf. anhängen
-    if args.auxcmd:
-        aux_out = run_cmd(args.auxcmd, args.shell, args.timeout, args.no_warn)
-        frame_body = main_out + "###\n" + (aux_out if aux_out.endswith("\n") else aux_out + "\n")
-    else:
-        frame_body = main_out
-
-    # 3) Header als String bauen
-    if args.clear:
-        left = (f"Every {args.interval:.1f}s: {args.cmd}" if args.cmd else "STDIN")
-        right = "  ".join([p for p in (args.header, now_str(args.utc)) if p])
-        header = build_header_line(left, right, color=args.color_header) + "\n"
-        # 4) Atomare Ausgabe: clear + Header + Inhalt in EINEM write
-        sys.stdout.write("\x1b[H\x1b[2J" + header + frame_body)
-    else:
-        sys.stdout.write(frame_body)
-
-    sys.stdout.flush()
-
-def now_str(use_utc: bool) -> str:
-    fmt = "%a %b %d %H:%M:%S %Z %Y"
-    return time.strftime(fmt, time.gmtime() if use_utc else time.localtime())
 
 def main():
     args = parse_args()
@@ -265,30 +242,27 @@ def main():
         sys.stderr.write("[ERROR] Keine gültigen Patterns geladen.\n"); sys.exit(2)
 
     def one_run():
-        if args.clear:
-            clear_screen()
-            left = (f"Every {args.interval:.1f}s: {args.cmd}" if args.cmd else "STDIN")
-            right_parts = []
-            if args.header:
-                right_parts.append(args.header)
-            right_parts.append(now_str(args.utc))
-            right = "  ".join(right_parts)
-            render_header(left, right, color=args.color_header)
-            print()  # Leerzeile
-
-        # Hauptverarbeitung
+        # 1) Daten holen & verarbeiten (erst rechnen, NICHT sofort clearn)
         text = run_cmd(args.cmd, args.shell, args.timeout, args.no_warn) if args.cmd else sys.stdin.read()
         main_out = process_text(text, patterns, args.maxw, sep, between, args.strip_punct)
 
-        # Aux-Verarbeitung (nur anhängen, nicht analysieren)
+        # 2) Aux-Output ggf. anhängen
         if args.auxcmd:
             aux_out = run_cmd(args.auxcmd, args.shell, args.timeout, args.no_warn)
-            sys.stdout.write(main_out)
-            sys.stdout.write("###\n")
-            sys.stdout.write(aux_out if aux_out.endswith("\n") else aux_out + "\n")
+            frame_body = main_out + "###\n" + (aux_out if aux_out.endswith("\n") else aux_out + "\n")
         else:
-            sys.stdout.write(main_out)
+            frame_body = main_out
 
+        # 3) Header-String bauen (falls --clear)
+        frame = frame_body
+        if args.clear:
+            left = (f"Every {args.interval:.1f}s: {args.cmd}" if args.cmd else "STDIN")
+            right = "  ".join([p for p in (args.header, now_str(args.utc)) if p])
+            header = build_header_line(left, right, color=args.color_header) + "\n"
+            # 4) Atomar ausgeben: Clear + Header + Frame in EINEM write → kein Flackern
+            frame = "\x1b[H\x1b[2J" + header + frame_body
+
+        sys.stdout.write(frame)
         sys.stdout.flush()
 
     if args.interval and args.interval > 0:
