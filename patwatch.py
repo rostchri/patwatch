@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-patwatch.py — watch-style Regex-Zähler mit optionalem Kommando, Intervall,
-farbigem Header, UTC/Custom-Header, POSIX-Regex-Klassen-Unterstützung.
+patwatch.py — Regex-Zähler mit watch-Header, optionalem Zweitkommando (--auxcmd)
 
-Pattern-Datei: ID<TAB>LINE_REGEX<TAB>WORD_REGEX(optional)
+Pattern-Datei:  ID<TAB>LINE_REGEX<TAB>WORD_REGEX(optional)
+Funktionen:
+- Zählt pro ID die Match-Zeilen
+- Extrahiert pro Match ein Wort: WORD_REGEX (1. Gruppe bevorzugt) oder letztes Wort der Zeile
+- Gibt "erste N" und "letzte M" Wörter ohne Überschneidung aus; Ellipse nur bei echter Lücke
+- Eingabe aus STDIN ODER via --cmd (inkl. Pipes); optional periodisch mit --interval
+- Optionaler Header (--clear/--color-header/--utc/--header)
+- STDERR-Unterdrückung mit --no-warn
+- NEU: --auxcmd → wird nach Hauptverarbeitung ausgeführt; STDOUT wird mit "###" angehängt
 """
 
 import sys, re, argparse, subprocess, time, shutil
@@ -22,18 +29,24 @@ def parse_args():
     p.add_argument("-i","--ignorecase", action="store_true", help="Case-insensitive Matching")
     p.add_argument("--strip-punct", action="store_true", help="Satzzeichen am Wortanfang/-ende entfernen")
     p.add_argument("--fs", default="\\t", help="Feldtrenner in Pattern-Datei (Default: '\\t')")
-    # Kommando/Watcher
+
+    # Hauptkommando / Watch
     p.add_argument("-c","--cmd", help="Shell-Kommando (Pipes erlaubt); dessen STDOUT wird ausgewertet.")
     p.add_argument("-t","--interval", type=float, default=0.0, help="Intervall in Sekunden (watch-artig). 0 = einmalig.")
-    p.add_argument("--shell", default="/bin/sh", help="Shell für -c/--cmd (Default: /bin/sh)")
+    p.add_argument("--shell", default="/bin/sh", help="Shell für -c/--cmd und --auxcmd (Default: /bin/sh)")
     p.add_argument("--timeout", type=float, default=None, help="Timeout in Sekunden fürs Kommando (optional)")
     p.add_argument("--clear", action="store_true", help="Pro Durchlauf Bildschirm löschen + Header wie 'watch'")
     p.add_argument("--no-warn", action="store_true",
-                   help="Unterdrückt STDERR des Kommandos und interne Warnhinweise bei Exit≠0.")
+                   help="Unterdrückt STDERR der Kommandos und interne Warnhinweise bei Exit≠0.")
     p.add_argument("--color-header", action="store_true",
-                   help="Farbiger Header: dunkles tmux-Grün als Hintergrund, schwarze Schrift.")
+                   help="Farbiger Header: tmux-dunkelgrün (BG) + schwarzer Text.")
+
+    # Header-Extras
     p.add_argument("--utc", action="store_true", help="Timestamp im Header in UTC ausgeben.")
     p.add_argument("--header", default="", help="Custom-Headertext; erscheint oben rechts vor dem Timestamp.")
+
+    # NEU: Zusatzkommando
+    p.add_argument("-a","--auxcmd", help="Zweites Shell-Kommando; dessen STDOUT wird mit '###' angehängt.")
     return p.parse_args()
 
 def unescape(s: str) -> str:
@@ -67,8 +80,7 @@ def strip_punct(word: str) -> str:
 
 class PatternRec:
     __slots__ = ("pid","line_re","word_re","count","head","head_count","tail","tail_max")
-    def __init__(self, pid: str, line_re: Pattern, word_re: Optional[Pattern],
-                 maxw: int, lastw: int):
+    def __init__(self, pid: str, line_re: Pattern, word_re: Optional[Pattern], maxw: int, lastw: int):
         self.pid = pid
         self.line_re = line_re
         self.word_re = word_re
@@ -194,7 +206,9 @@ def run_cmd(cmd: str, shell_path: str, timeout: Optional[float], no_warn: bool) 
 def clear_screen():
     sys.stdout.write("\x1b[H\x1b[2J"); sys.stdout.flush()
 
-def render_header(left: str, right: str, color: bool):
+# statt render_header():
+def build_header_line(left: str, right: str, color: bool) -> str:
+    import shutil
     cols = shutil.get_terminal_size(fallback=(80, 24)).columns
     if len(left) + 1 + len(right) <= cols:
         spaces = cols - len(left) - len(right)
@@ -206,12 +220,34 @@ def render_header(left: str, right: str, color: bool):
         right = right[-max_right:] if max_right > 0 else ""
         sep = " " if (cols - len(left) - len(right)) > 0 else ""
         line = left + sep + right
-
     if color:
-        # schwarzer Text (30), dunkelgrüner Hintergrund (48;5;22) wie tmux
-        sys.stdout.write(f"\x1b[30;48;5;22m{line.ljust(cols)}\x1b[0m\n")
+        return f"\x1b[30;48;5;22m{line.ljust(cols)}\x1b[0m\n"
+    return line + "\n"
+
+
+def one_run():
+    # 1) Daten holen & verarbeiten (erst rechnen, NICHT clearn)
+    text = run_cmd(args.cmd, args.shell, args.timeout, args.no_warn) if args.cmd else sys.stdin.read()
+    main_out = process_text(text, patterns, args.maxw, sep, between, args.strip_punct)
+
+    # 2) Aux-Output ggf. anhängen
+    if args.auxcmd:
+        aux_out = run_cmd(args.auxcmd, args.shell, args.timeout, args.no_warn)
+        frame_body = main_out + "###\n" + (aux_out if aux_out.endswith("\n") else aux_out + "\n")
     else:
-        sys.stdout.write(line + "\n")
+        frame_body = main_out
+
+    # 3) Header als String bauen
+    if args.clear:
+        left = (f"Every {args.interval:.1f}s: {args.cmd}" if args.cmd else "STDIN")
+        right = "  ".join([p for p in (args.header, now_str(args.utc)) if p])
+        header = build_header_line(left, right, color=args.color_header) + "\n"
+        # 4) Atomare Ausgabe: clear + Header + Inhalt in EINEM write
+        sys.stdout.write("\x1b[H\x1b[2J" + header + frame_body)
+    else:
+        sys.stdout.write(frame_body)
+
+    sys.stdout.flush()
 
 def now_str(use_utc: bool) -> str:
     fmt = "%a %b %d %H:%M:%S %Z %Y"
@@ -240,8 +276,19 @@ def main():
             render_header(left, right, color=args.color_header)
             print()  # Leerzeile
 
+        # Hauptverarbeitung
         text = run_cmd(args.cmd, args.shell, args.timeout, args.no_warn) if args.cmd else sys.stdin.read()
-        sys.stdout.write(process_text(text, patterns, args.maxw, sep, between, args.strip_punct))
+        main_out = process_text(text, patterns, args.maxw, sep, between, args.strip_punct)
+
+        # Aux-Verarbeitung (nur anhängen, nicht analysieren)
+        if args.auxcmd:
+            aux_out = run_cmd(args.auxcmd, args.shell, args.timeout, args.no_warn)
+            sys.stdout.write(main_out)
+            sys.stdout.write("###\n")
+            sys.stdout.write(aux_out if aux_out.endswith("\n") else aux_out + "\n")
+        else:
+            sys.stdout.write(main_out)
+
         sys.stdout.flush()
 
     if args.interval and args.interval > 0:
