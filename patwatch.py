@@ -2,22 +2,20 @@
 # -*- coding: utf-8 -*-
 """
 patwatch.py — Regex-Zähler mit watch-Style-Header, optionalem Zweitkommando,
-Anti-Flackern-Ausgabe und vielfältigen Optionen.
+Anti-Flackern-Ausgabe und vielen Optionen.
 
 Pattern-Datei (Tab-getrennt):
   ID<TAB>LINE_REGEX<TAB>WORD_REGEX(optional)
 
 Funktionen:
 - Zählt pro ID die Match-Zeilen
-- Extrahiert pro Match ein Wort: WORD_REGEX (1. Gruppe bevorzugt) oder letztes Wort der Zeile
-- Gibt "erste N" (Head) und "letzte M" (Tail) Wörter ohne Überschneidung aus
-- Ellipse/Trenner nur, wenn eine echte Lücke zwischen Head und Tail existiert
+- Wort pro Match: WORD_REGEX (1. Gruppe bevorzugt) ODER letztes Wort der Zeile
+- "erste N" (Head) + "letzte M" (Tail) ohne Überschneidung; Ellipse nur bei echter Lücke
 - Eingabe aus STDIN ODER via --cmd (inkl. Pipes)
-- Watch-artig periodisch via --interval
-- Optionaler Header (--clear/--color-header/--utc/--header)
-- STDERR-Unterdrückung mit --no-warn
-- Zusatzkommando --auxcmd: wird NACH der Hauptverarbeitung ausgeführt, dessen STDOUT
-  wird mit einer "###"-Zeile angehängt
+- Periodisch via --interval
+- Header (--clear/--color-header/--utc/--header) ohne Flackern
+- STDERR-Unterdrückung (--no-warn)
+- Aux-Kommando: --auxcmd (+ --aux-sep, --aux-timeout, --aux-before)
 """
 
 import sys, re, argparse, subprocess, time, shutil
@@ -40,7 +38,7 @@ def parse_args():
     p.add_argument("-c","--cmd", help="Shell-Kommando (Pipes erlaubt); dessen STDOUT wird ausgewertet.")
     p.add_argument("-t","--interval", type=float, default=0.0, help="Intervall in Sekunden (watch-artig). 0 = einmalig.")
     p.add_argument("--shell", default="/bin/sh", help="Shell für -c/--cmd und --auxcmd (Default: /bin/sh)")
-    p.add_argument("--timeout", type=float, default=None, help="Timeout in Sekunden fürs Kommando (optional)")
+    p.add_argument("--timeout", type=float, default=None, help="Timeout in Sekunden fürs Hauptkommando (optional)")
     p.add_argument("--clear", action="store_true", help="Pro Durchlauf Bildschirm löschen + Header wie 'watch'")
     p.add_argument("--no-warn", action="store_true",
                    help="Unterdrückt STDERR der Kommandos und interne Warnhinweise bei Exit≠0.")
@@ -52,7 +50,13 @@ def parse_args():
     p.add_argument("--header", default="", help="Custom-Headertext; erscheint oben rechts vor dem Timestamp.")
 
     # Zusatzkommando
-    p.add_argument("-a","--auxcmd", help="Zweites Shell-Kommando; dessen STDOUT wird mit '###' angehängt.")
+    p.add_argument("-a","--auxcmd", help="Zweites Shell-Kommando; dessen STDOUT wird angehängt.")
+    p.add_argument("--aux-sep", default="###",
+                   help="Trennerzeile vor/zwischen Haupt- und Aux-Output (Default: '###'). Escape wie '\\n' erlaubt.")
+    p.add_argument("--aux-timeout", type=float, default=None,
+                   help="Eigenes Timeout (Sekunden) für --auxcmd. Default: --timeout.")
+    p.add_argument("--aux-before", action="store_true",
+                   help="Aux-Block vor dem Hauptblock ausgeben.")
     return p.parse_args()
 
 def unescape(s: str) -> str:
@@ -235,6 +239,7 @@ def main():
     fs = unescape(args.fs)
     sep = unescape(args.sep)
     between = unescape(args.between)
+    aux_sep = unescape(args.aux_sep)
     flags = re.IGNORECASE if args.ignorecase else 0
 
     patterns = load_patterns(args.patterns, fs, flags, args.maxw, args.lastw)
@@ -242,16 +247,18 @@ def main():
         sys.stderr.write("[ERROR] Keine gültigen Patterns geladen.\n"); sys.exit(2)
 
     def one_run():
-        # 1) Daten holen & verarbeiten (erst rechnen, NICHT sofort clearn)
+        # 1) Daten holen & verarbeiten (erst rechnen, NICHT sofort clearn → kein Flackern)
         text = run_cmd(args.cmd, args.shell, args.timeout, args.no_warn) if args.cmd else sys.stdin.read()
         main_out = process_text(text, patterns, args.maxw, sep, between, args.strip_punct)
 
-        # 2) Aux-Output ggf. anhängen
+        # 2) Aux-Output ggf. anhängen (Position via --aux-before)
+        frame_body = main_out
         if args.auxcmd:
-            aux_out = run_cmd(args.auxcmd, args.shell, args.timeout, args.no_warn)
-            frame_body = main_out + "###\n" + (aux_out if aux_out.endswith("\n") else aux_out + "\n")
-        else:
-            frame_body = main_out
+            aux_to = args.aux_timeout if args.aux_timeout is not None else args.timeout
+            aux_out = run_cmd(args.auxcmd, args.shell, aux_to, args.no_warn)
+            sep_line = aux_sep + ("" if aux_sep.endswith("\n") else "\n")
+            aux_block = sep_line + (aux_out if aux_out.endswith("\n") else aux_out + "\n")
+            frame_body = (aux_block + main_out) if args.aux_before else (main_out + aux_block)
 
         # 3) Header-String bauen (falls --clear)
         frame = frame_body
