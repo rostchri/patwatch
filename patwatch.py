@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-patwatch.py — watch-style, farbiger Header, --no-warn, --utc, --header "<custom>"
+patwatch.py — watch-style Regex-Zähler mit optionalem Kommando, Intervall,
+farbigem Header, UTC/Custom-Header, POSIX-Regex-Klassen-Unterstützung.
 
-- Musterdatei:   ID<TAB>LINE_REGEX<TAB>WORD_REGEX(optional)
-- Pro ID:        zählt Matches, sammelt erste N und letzte M Wörter (ohne Überschneidung),
-                 Ellipse nur bei echter Lücke.
-- Eingabe:       STDIN oder via -c/--cmd (inkl. Pipes), optional periodisch (-t/--interval).
-- Header:        --clear löscht Screen; links "Every <interval>s: <cmd>" (oder "STDIN"),
-                 rechts "<custom>  <timestamp>", auf Wunsch farbig (--color-header).
+Pattern-Datei: ID<TAB>LINE_REGEX<TAB>WORD_REGEX(optional)
 """
 
 import sys, re, argparse, subprocess, time, shutil
 from collections import deque
-from typing import List, Optional
+from typing import List, Optional, Pattern
 
 # ---------- CLI ----------
 def parse_args():
@@ -36,7 +32,6 @@ def parse_args():
                    help="Unterdrückt STDERR des Kommandos und interne Warnhinweise bei Exit≠0.")
     p.add_argument("--color-header", action="store_true",
                    help="Farbiger Header: dunkles tmux-Grün als Hintergrund, schwarze Schrift.")
-    # NEU:
     p.add_argument("--utc", action="store_true", help="Timestamp im Header in UTC ausgeben.")
     p.add_argument("--header", default="", help="Custom-Headertext; erscheint oben rechts vor dem Timestamp.")
     return p.parse_args()
@@ -70,9 +65,10 @@ def last_word(line: str) -> str:
 def strip_punct(word: str) -> str:
     return re.sub(r'^[^\w\s]+|[^\w\s]+$', "", word)
 
-class Pattern:
+class PatternRec:
     __slots__ = ("pid","line_re","word_re","count","head","head_count","tail","tail_max")
-    def __init__(self, pid: str, line_re: re.Pattern, word_re: Optional[re.Pattern], maxw: int, lastw: int):
+    def __init__(self, pid: str, line_re: Pattern, word_re: Optional[Pattern],
+                 maxw: int, lastw: int):
         self.pid = pid
         self.line_re = line_re
         self.word_re = word_re
@@ -80,15 +76,15 @@ class Pattern:
         self.head: List[str] = []
         self.head_count = 0
         self.tail_max = max(0, lastw)
-        self.tail = deque(maxlen=self.tail_max if self.tail_max > 0 else None)
+        self.tail = deque(maxlen=lastw) if lastw > 0 else deque()
 
-def compile_rx(rx: str, flags: int) -> re.Pattern:
+def compile_rx(rx: str, flags: int) -> Pattern:
     return re.compile(rx, flags)
 
-def pick_word(line: str, pat: Pattern) -> str:
+def pick_word(line: str, pat: PatternRec) -> str:
     if pat.word_re is not None:
         m = pat.word_re.search(line)
-        if not m: return ""  # kein Wort anhängen (Zähler zählt trotzdem)
+        if not m: return ""
         if m.lastindex:
             for gi in range(1, m.lastindex+1):
                 g = m.group(gi)
@@ -97,8 +93,8 @@ def pick_word(line: str, pat: Pattern) -> str:
         return m.group(0)
     return last_word(line)
 
-def load_patterns(path: str, fs: str, flags: int, maxw: int, lastw: int) -> List[Pattern]:
-    pats: List[Pattern] = []
+def load_patterns(path: str, fs: str, flags: int, maxw: int, lastw: int) -> List[PatternRec]:
+    pats: List[PatternRec] = []
     with open(path, "r", encoding="utf-8") as f:
         for ln, raw in enumerate(f, 1):
             line = raw.rstrip("\n")
@@ -124,11 +120,11 @@ def load_patterns(path: str, fs: str, flags: int, maxw: int, lastw: int) -> List
                 try: wre = compile_rx(word_rx, flags)
                 except re.error as e:
                     sys.stderr.write(f"[WARN] Zeile {ln}: ungültige WORD_REGEX '{parts[2]}': {e}. WORD_REGEX ignoriert.\n")
-            pats.append(Pattern(pid, lre, wre, maxw, lastw))
+            pats.append(PatternRec(pid, lre, wre, maxw, lastw))
     return pats
 
 # ---------- Kernverarbeitung ----------
-def process_text(input_text: str, patterns: List[Pattern], maxw: int, sep: str, between: str, strip_p: bool) -> str:
+def process_text(input_text: str, patterns: List[PatternRec], maxw: int, sep: str, between: str, strip_p: bool) -> str:
     for pat in patterns:
         pat.count = 0
         pat.head.clear()
@@ -196,7 +192,6 @@ def run_cmd(cmd: str, shell_path: str, timeout: Optional[float], no_warn: bool) 
     return completed.stdout or ""
 
 def clear_screen():
-    # Cursor Home + Clear Screen
     sys.stdout.write("\x1b[H\x1b[2J"); sys.stdout.flush()
 
 def render_header(left: str, right: str, color: bool):
@@ -219,7 +214,6 @@ def render_header(left: str, right: str, color: bool):
         sys.stdout.write(line + "\n")
 
 def now_str(use_utc: bool) -> str:
-    # z. B.: Fri Aug 29 13:37:42 CEST 2025 (lokal) oder Fri Aug 29 11:37:42 UTC 2025 (UTC)
     fmt = "%a %b %d %H:%M:%S %Z %Y"
     return time.strftime(fmt, time.gmtime() if use_utc else time.localtime())
 
@@ -246,7 +240,7 @@ def main():
             render_header(left, right, color=args.color_header)
             print()  # Leerzeile
 
-        text = run_cmd(args.cmd, args.shell, args.timeout, args.no_w arn) if args.cmd else sys.stdin.read()
+        text = run_cmd(args.cmd, args.shell, args.timeout, args.no_warn) if args.cmd else sys.stdin.read()
         sys.stdout.write(process_text(text, patterns, args.maxw, sep, between, args.strip_punct))
         sys.stdout.flush()
 
