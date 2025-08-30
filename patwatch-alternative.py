@@ -164,14 +164,36 @@ def apply_template(tmpl: str, m: Optional[re.Match]) -> str:
 
 # ---------- Transform-Pipeline ----------
 def parse_pipeline(s: str):
-    if not s: return []
-    tokens, cur, esc = [], [], False
-    for ch in s:
-        if esc: cur.append(ch); esc=False; continue
-        if ch == '\\': esc=True; continue
-        if ch == '|': tokens.append(''.join(cur).strip()); cur=[]; continue
-        cur.append(ch)
-    if cur: tokens.append(''.join(cur).strip())
+    """Splitte die Transform-Pipeline an unescaped '|' und erhalte Backslashes.
+       Sonderfälle:
+         - '\|' -> literal '|'
+         - '\\' -> literal '\'
+       Sonst bleibt '\' erhalten (z.B. für Backrefs \1, \g<name>, etc.).
+    """
+    if not s:
+        return []
+    tokens, cur = [], []
+    i, L = 0, len(s)
+    while i < L:
+        ch = s[i]
+        if ch == '\\':
+            if i + 1 < L:
+                nxt = s[i+1]
+                if nxt == '|':
+                    cur.append('|'); i += 2; continue
+                elif nxt == '\\':
+                    cur.append('\\'); i += 2; continue
+                else:
+                    # Backslash für etwas anderes (z.B. \1) -> erhalten
+                    cur.append('\\'); i += 1; continue
+            else:
+                cur.append('\\'); i += 1; continue
+        elif ch == '|':
+            tokens.append(''.join(cur).strip()); cur = []; i += 1; continue
+        else:
+            cur.append(ch); i += 1
+    if cur:
+        tokens.append(''.join(cur).strip())
     return [t for t in tokens if t]
 
 _CALL_RE = re.compile(r'^([a-zA-Z_]\w*)\s*(?:\((.*)\))?$')
