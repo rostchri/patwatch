@@ -630,14 +630,13 @@ def render_normal_view(patterns: List[PatternRec], sep: str, between: str, use_c
         legend_items = []
         for pat in patterns:
             if pat.transforms and pat.orig_words:  # Nur Patterns mit Transformationen
-                # Verwende das erste ursprüngliche Wort als Referenz (nur ein Eintrag pro Pattern)
-                if pat.orig_words:
-                    orig_word = pat.orig_words[0]
-                    alt_word = pat.alts[0] if pat.alts else ""
-                    # Verwende das ursprüngliche Wort in Uppercase
-                    original_ref = orig_word.upper()
-                    colored_orig = _color_chip_key(original_ref, alt_word)
-                    legend_items.append(colored_orig)  # Ursprüngliches Wort in Uppercase mit Farbe
+                # Verwende das erste alternative Wort als Referenz (nur ein Eintrag pro Pattern)
+                if pat.alts:
+                    alt_word = pat.alts[0]
+                    # Verwende das alternative Wort in Uppercase
+                    alternative_ref = alt_word.upper()
+                    colored_alt = _color_chip_key(alternative_ref, alt_word)
+                    legend_items.append(colored_alt)  # Alternatives Wort in Uppercase mit Farbe
         
         if legend_items:
             # Erstelle Legende am Anfang der Zeile
@@ -726,14 +725,13 @@ def render_alt_view(patterns: List[PatternRec], sep: str, between: str, use_colo
         legend_items = []
         for pat in patterns:
             if pat.transforms and pat.orig_words:  # Nur Patterns mit Transformationen
-                # Verwende das erste ursprüngliche Wort als Referenz (nur ein Eintrag pro Pattern)
-                if pat.orig_words:
-                    orig_word = pat.orig_words[0]
-                    alt_word = pat.alts[0] if pat.alts else ""
-                    # Verwende das ursprüngliche Wort in Uppercase
-                    original_ref = orig_word.upper()
-                    colored_orig = _color_chip_key(original_ref, alt_word)
-                    legend_items.append(colored_orig)  # Ursprüngliches Wort in Uppercase mit Farbe
+                # Verwende das erste alternative Wort als Referenz (nur ein Eintrag pro Pattern)
+                if pat.alts:
+                    alt_word = pat.alts[0]
+                    # Verwende das alternative Wort in Uppercase
+                    alternative_ref = alt_word.upper()
+                    colored_alt = _color_chip_key(alternative_ref, alt_word)
+                    legend_items.append(colored_alt)  # Alternatives Wort in Uppercase mit Farbe
         
         if legend_items:
             # Erstelle Legende am Anfang der Zeile
