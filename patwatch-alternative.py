@@ -279,7 +279,14 @@ class PatternRec:
         self.word_re = word_re
         self.tmpl = tmpl
         self.transforms = transforms  # 5. Spalte (Pipeline)
-        self.orig_ref = pid  # Ursprüngliche Referenz ist die Pattern-ID
+        # Extrahiere Backreference aus Spalte 5 (z.B. \1, \2, etc.)
+        self.orig_ref = ""
+        if transforms:
+            # Suche nach Backreferences wie \1, \2, etc.
+            import re
+            backref_match = re.search(r'\\(\d+)', transforms)
+            if backref_match:
+                self.orig_ref = backref_match.group(0)  # z.B. "\1"
         self.count = 0
         self.head: List[str] = []
         self.head_keys: List[str] = []   # Farb-Key je Head-Wort (Altwort dominiert)
@@ -623,16 +630,14 @@ def render_normal_view(patterns: List[PatternRec], sep: str, between: str, use_c
         legend_items = []
         for pat in patterns:
             if pat.transforms and pat.orig_words:  # Nur Patterns mit Transformationen
-                # Sammle eindeutige ursprüngliche Wörter mit ihren Farben
-                seen_orig = set()
-                
-                for orig_word, alt_word in zip(pat.orig_words, pat.alts):
-                    if orig_word and orig_word not in seen_orig:
-                        seen_orig.add(orig_word)
-                        # Verwende die ursprüngliche Referenz aus Spalte 5 (vor Transformation) in Uppercase
-                        original_ref = pat.orig_ref.upper() if pat.orig_ref else orig_word.upper()
-                        colored_orig = _color_chip_key(original_ref, alt_word)
-                        legend_items.append(colored_orig)  # Ursprüngliche Referenz in Uppercase mit Farbe
+                # Verwende das erste ursprüngliche Wort als Referenz (nur ein Eintrag pro Pattern)
+                if pat.orig_words:
+                    orig_word = pat.orig_words[0]
+                    alt_word = pat.alts[0] if pat.alts else ""
+                    # Verwende das ursprüngliche Wort in Uppercase
+                    original_ref = orig_word.upper()
+                    colored_orig = _color_chip_key(original_ref, alt_word)
+                    legend_items.append(colored_orig)  # Ursprüngliches Wort in Uppercase mit Farbe
         
         if legend_items:
             # Erstelle Legende am Anfang der Zeile
@@ -721,16 +726,14 @@ def render_alt_view(patterns: List[PatternRec], sep: str, between: str, use_colo
         legend_items = []
         for pat in patterns:
             if pat.transforms and pat.orig_words:  # Nur Patterns mit Transformationen
-                # Sammle eindeutige ursprüngliche Wörter mit ihren Farben
-                seen_orig = set()
-                
-                for orig_word, alt_word in zip(pat.orig_words, pat.alts):
-                    if orig_word and orig_word not in seen_orig:
-                        seen_orig.add(orig_word)
-                        # Verwende die ursprüngliche Referenz aus Spalte 5 (vor Transformation) in Uppercase
-                        original_ref = pat.orig_ref.upper() if pat.orig_ref else orig_word.upper()
-                        colored_orig = _color_chip_key(original_ref, alt_word)
-                        legend_items.append(colored_orig)  # Ursprüngliche Referenz in Uppercase mit Farbe
+                # Verwende das erste ursprüngliche Wort als Referenz (nur ein Eintrag pro Pattern)
+                if pat.orig_words:
+                    orig_word = pat.orig_words[0]
+                    alt_word = pat.alts[0] if pat.alts else ""
+                    # Verwende das ursprüngliche Wort in Uppercase
+                    original_ref = orig_word.upper()
+                    colored_orig = _color_chip_key(original_ref, alt_word)
+                    legend_items.append(colored_orig)  # Ursprüngliches Wort in Uppercase mit Farbe
         
         if legend_items:
             # Erstelle Legende am Anfang der Zeile
