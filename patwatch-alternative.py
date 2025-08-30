@@ -271,7 +271,7 @@ def apply_pipeline(word: str, pipeline: str, m: Optional[re.Match]) -> str:
 # ---------- Datenstruktur ----------
 class PatternRec:
     __slots__ = ("pid","line_re","word_re","tmpl","transforms",
-                 "count","head","head_keys","head_count","tail","tail_keys","tail_max","alts")
+                 "count","head","head_keys","head_count","tail","tail_keys","tail_max","alts","orig_words")
     def __init__(self, pid: str, line_re: Pattern, word_re: Optional[Pattern],
                  tmpl: str, transforms: str, maxw: int, lastw: int):
         self.pid = pid
@@ -287,6 +287,7 @@ class PatternRec:
         self.tail = deque(maxlen=lastw) if lastw > 0 else deque()
         self.tail_keys = deque(maxlen=lastw) if lastw > 0 else deque()  # Farb-Key je Tail-Wort
         self.alts: List[str] = []  # Historie alternativer Wörter (für Alt-Ansicht)
+        self.orig_words: List[str] = []  # Ursprüngliche Wörter vor Transformation (für Legende)
 
 def compile_rx(rx: str, flags: int) -> Pattern:
     return re.compile(rx, flags)
@@ -363,6 +364,7 @@ def process_text(input_text: str, patterns: List[PatternRec], maxw: int, sep: st
         pat.head_keys.clear()
         pat.head_count = 0
         pat.alts.clear()
+        pat.orig_words.clear()  # Reset ursprüngliche Wörter
         if pat.tail_max > 0:
             pat.tail.clear()
             pat.tail_keys.clear()
@@ -373,6 +375,8 @@ def process_text(input_text: str, patterns: List[PatternRec], maxw: int, sep: st
                 pat.count += 1
                 w, m = extract_word_and_match(line, pat, cg_sep)
                 if strip_p and w: w = strip_punct(w)
+                # Speichere ursprüngliches Wort für Legende
+                pat.orig_words.append(w)
                 # Transformiertes Alternativwort (Spalte 5; darf Backrefs als Quelle nutzen)
                 alt = apply_pipeline(w, pat.transforms, m) if pat.transforms else w
                 pat.alts.append(alt)
@@ -448,15 +452,31 @@ def _contrast(l1: float, l2: float) -> float:
     return (l1 + 0.05) / (l2 + 0.05)
 
 def _best_fg_for_bg(r: int, g: int, b: int) -> int:
-    """Wähle 15 (weiß) oder 16 (schwarz) – höchster Kontrast; nie Schwarz auf starkem Rot/Blau."""
+    """Wähle 15 (weiß) oder 16 (schwarz) – höchster Kontrast; vermeide unleserliche Kombinationen."""
     lum = _rel_lum_rgb(r, g, b)
     cr_black = _contrast(lum, 0.0)
     cr_white = _contrast(1.0, lum)
-    dominant_red  = (r > g * 1.25) and (r > b * 1.25)
-    dominant_blue = (b > g * 1.25) and (b > r * 1.25)
-    if dominant_red or dominant_blue:
-        return 15  # weiß
-    return 15 if cr_white >= cr_black else 16
+    
+    # Strikte Kontrast-Regeln für bessere Lesbarkeit
+    # Mindestkontrast von 4.5 (WCAG AA) für gute Lesbarkeit
+    min_contrast = 4.5
+    
+    # Prüfe ob schwarzer Text lesbar wäre
+    black_readable = cr_black >= min_contrast
+    white_readable = cr_white >= min_contrast
+    
+    # Wenn beide lesbar sind, wähle den besseren Kontrast
+    if black_readable and white_readable:
+        return 15 if cr_white >= cr_black else 16
+    
+    # Wenn nur einer lesbar ist, verwende den lesbaren
+    if black_readable:
+        return 16
+    if white_readable:
+        return 15
+    
+    # Fallback: Verwende weiß für dunkle Hintergründe, schwarz für helle
+    return 15 if lum < 0.5 else 16
 
 def build_palette() -> list[tuple[int, int]]:
     """Erzeuge (fg,bg)-Paare mit gutem Kontrast; mind. 120 Stück."""
@@ -489,25 +509,33 @@ def build_palette() -> list[tuple[int, int]]:
 _PALETTE = build_palette()
 
 class _ColorAllocator:
-    """Hash-basierter Allokator: Verwendet Hash-Funktion für deterministische aber gut verteilte Farben."""
+    """Hash-basierter Allokator: Verwendet deterministische Hash-Funktion für konsistente Farben."""
     def __init__(self, palette):
         self.palette = list(palette)
         self.map = {}       # key -> palette index
     
+    def _deterministic_hash(self, key: str) -> int:
+        """Deterministische Hash-Funktion für konsistente Farben bei jedem Programmstart."""
+        # Verwende einen einfachen aber effektiven Hash-Algorithmus
+        # der deterministisch ist und gut verteilt
+        hash_value = 0
+        for i, char in enumerate(key):
+            # Kombiniere Zeichen-Code mit Position für bessere Verteilung
+            hash_value = ((hash_value << 5) + hash_value + ord(char) * (i + 1)) & 0xFFFFFFFF
+        
+        # Füge Länge hinzu für bessere Verteilung bei kurzen Strings
+        hash_value = (hash_value + len(key) * 31) & 0xFFFFFFFF
+        
+        return hash_value
+    
     def pair_for(self, key: str):
-        """Gibt (fg,bg) für den Key zurück; Hash-basierte Farbauswahl für gute Verteilung."""
+        """Gibt (fg,bg) für den Key zurück; deterministische Hash-basierte Farbauswahl."""
         if key not in self.map:
-            # Verwende Hash-Funktion für deterministische aber gut verteilte Farbauswahl
-            # Kombiniere verschiedene Hash-Aspekte für bessere Verteilung
-            hash_value = hash(key)
-            char_sum = sum(ord(c) for c in key)
-            length_factor = len(key)
-            
-            # Kombiniere verschiedene Faktoren für bessere Verteilung
-            combined_hash = (hash_value + char_sum * 31 + length_factor * 17) & 0xFFFFFFFF
+            # Verwende deterministische Hash-Funktion
+            hash_value = self._deterministic_hash(key)
             
             # Verwende modulo für Palette-Index
-            self.map[key] = combined_hash % len(self.palette)
+            self.map[key] = hash_value % len(self.palette)
                 
         return self.palette[self.map[key]]
 
@@ -588,6 +616,27 @@ def render_normal_view(patterns: List[PatternRec], sep: str, between: str, use_c
                 words = sep.join(last_list)
 
         out_lines.append(f"{pat.pid}\t{total}\t{words}")
+    
+    # Füge Farb-Legende in die erste Zeile hinzu (auch in normaler Ansicht)
+    if use_color:
+        legend_items = []
+        for pat in patterns:
+            if pat.transforms and pat.orig_words:  # Nur Patterns mit Transformationen
+                # Sammle eindeutige ursprüngliche Wörter mit ihren Farben
+                seen_orig = set()
+                
+                for orig_word, alt_word in zip(pat.orig_words, pat.alts):
+                    if orig_word and orig_word not in seen_orig:
+                        seen_orig.add(orig_word)
+                        # Verwende die Farbe des transformierten Worts für das ursprüngliche Wort
+                        colored_orig = _color_chip_key(orig_word, alt_word)
+                        legend_items.append(colored_orig)  # Nur das ursprüngliche Wort mit Farbe
+        
+        if legend_items:
+            # Erstelle Legende am Anfang der Zeile
+            legend_line = " ".join(legend_items)
+            out_lines.insert(0, legend_line)
+    
     return "\n".join(out_lines) + ("\n" if out_lines else "")
 
 def render_alt_view(patterns: List[PatternRec], sep: str, between: str, use_color: bool, no_warn: bool = False) -> str:
@@ -664,18 +713,42 @@ def render_alt_view(patterns: List[PatternRec], sep: str, between: str, use_colo
         right_only = (j_color(words[n-j_max:]) if use_color else j_plain(words[n-j_max:]))
         content = left_only if len(left_only) >= len(right_only) else right_only
         lines.append(prefix + (content if content else "") + ("\n" if content else "\n"))
+    
+    # Füge Farb-Legende in die erste Zeile hinzu
+    if use_color:
+        legend_items = []
+        for pat in patterns:
+            if pat.transforms and pat.orig_words:  # Nur Patterns mit Transformationen
+                # Sammle eindeutige ursprüngliche Wörter mit ihren Farben
+                seen_orig = set()
+                
+                for orig_word, alt_word in zip(pat.orig_words, pat.alts):
+                    if orig_word and orig_word not in seen_orig:
+                        seen_orig.add(orig_word)
+                        # Verwende die Farbe des transformierten Worts für das ursprüngliche Wort
+                        colored_orig = _color_chip_key(orig_word, alt_word)
+                        legend_items.append(colored_orig)  # Nur das ursprüngliche Wort mit Farbe
+        
+        if legend_items:
+            # Erstelle Legende am Anfang der Zeile
+            legend_line = " ".join(legend_items) + "\n"
+            lines.insert(0, legend_line)
+    
     return "".join(lines)
 
 # ---------- Kommando & Header/Watch ----------
-def run_cmd(cmd: str, shell_path: str, timeout: Optional[float], no_warn: bool) -> str:
+def run_cmd(cmd: str, shell_path: str, timeout: Optional[float], no_warn: bool) -> tuple[str, float]:
     if not cmd or not cmd.strip():
-        return ""
+        return "", 0.0
     
     try:
         # Validierung der Shell-Parameter
         if not os.path.exists(shell_path):
             sys.stderr.write(f"[ERROR] Shell '{shell_path}' nicht gefunden.\n")
-            return ""
+            return "", 0.0
+        
+        # Zeitmessung starten
+        cmd_start = time.perf_counter()
         
         completed = subprocess.run(
             [shell_path, "-c", cmd],
@@ -685,25 +758,29 @@ def run_cmd(cmd: str, shell_path: str, timeout: Optional[float], no_warn: bool) 
             text=True,
             timeout=timeout,
         )
+        
+        # Zeitmessung beenden
+        cmd_time = time.perf_counter() - cmd_start
+        
         if (not no_warn) and completed.returncode != 0 and completed.stderr:
             sys.stderr.write(f"[WARN] Kommando Exit {completed.returncode}: {completed.stderr}\n")
-        return completed.stdout or ""
+        return completed.stdout or "", cmd_time
     except subprocess.TimeoutExpired:
         if not no_warn:
             sys.stderr.write(f"[WARN] Kommando Timeout nach {timeout}s: {cmd}\n")
-        return ""
+        return "", 0.0
     except FileNotFoundError:
         if not no_warn:
             sys.stderr.write(f"[ERROR] Shell '{shell_path}' nicht gefunden.\n")
-        return ""
+        return "", 0.0
     except PermissionError:
         if not no_warn:
             sys.stderr.write(f"[ERROR] Keine Berechtigung für Shell '{shell_path}'.\n")
-        return ""
+        return "", 0.0
     except Exception as e:
         if not no_warn:
             sys.stderr.write(f"[ERROR] Unerwarteter Fehler beim Ausführen des Kommandos: {e}\n")
-        return ""
+        return "", 0.0
 
 def now_str(use_utc: bool) -> str:
     fmt = "%a %b %d %H:%M:%S %Z %Y"
@@ -723,8 +800,8 @@ def build_header_line(left: str, right: str, color: bool) -> str:
         line = left + sep + right
     if color:
         # schwarzer Text (30) auf tmux-dunkelgrünem Hintergrund (48;5;22)
-        return f"\x1b[30;48;5;22m{line.ljust(cols)}\x1b[0m\n"
-    return line + "\n"
+        return f"\x1b[30;48;5;22m{line.ljust(cols)}\x1b[0m"
+    return line
 
 # ---------- Tastatur-Poll (für 'a' Toggle) ----------
 class KeyPoller:
@@ -809,10 +886,12 @@ def main():
         last_text = ""
         last_normal_content = ""
         last_alt_content = ""
+        last_cmd_time = 0.0
+        last_proc_time = 0
 
         def update_display():
             """Nur die Anzeige aktualisieren, ohne neue Daten zu laden"""
-            nonlocal alt_mode, current_interval
+            nonlocal alt_mode, current_interval, last_cmd_time, last_proc_time
             
             # Verwende gecachte Inhalte
             if alt_mode:
@@ -829,9 +908,15 @@ def main():
                 right_parts = []
                 if args.header or mode_tag:
                     right_parts.append((args.header + mode_tag).strip())
-                right_parts.append(f"{ts}")
+                # Zeige letzte Kommando-Zeit und Verarbeitungszeit im Format [Xs|Yms]
+                if args.cmd and last_cmd_time > 0:
+                    cmd_sec = int(round(last_cmd_time))
+                    time_str = f"[{cmd_sec}s|{last_proc_time}ms]"
+                else:
+                    time_str = f"[{last_proc_time}ms]"
+                right_parts.append(f"{ts} {time_str}")
                 right = "  ".join([p for p in right_parts if p])
-                header = build_header_line(left, right, color=args.color_header) + "\n"
+                header = build_header_line(left, right, color=args.color_header)
                 frame = "\x1b[H\x1b[2J" + header + content
 
             try:
@@ -842,12 +927,13 @@ def main():
                 sys.exit(0)
 
         def one_frame():
-            nonlocal alt_mode, current_interval, last_text, last_normal_content, last_alt_content
+            nonlocal alt_mode, current_interval, last_text, last_normal_content, last_alt_content, last_cmd_time, last_proc_time
 
             # --- 0) Hauptkommando (nicht in Laufzeitmessung enthalten) ---
+            cmd_time = 0.0
             try:
                 if args.cmd:
-                    text = run_cmd(args.cmd, args.shell, args.timeout, args.no_warn)
+                    text, cmd_time = run_cmd(args.cmd, args.shell, args.timeout, args.no_warn)
                 else:
                     # STDIN-Pipe-Modus: Lese bis EOF oder Prozess-Ende
                     text = ""
@@ -908,10 +994,20 @@ def main():
                 right_parts = []
                 if args.header or mode_tag:
                     right_parts.append((args.header + mode_tag).strip())
-                right_parts.append(f"{ts} [{ms}ms]")
+                # Zeige Kommando-Zeit und Verarbeitungszeit im Format [Xs|Yms]
+                if args.cmd and cmd_time > 0:
+                    cmd_sec = int(round(cmd_time))
+                    time_str = f"[{cmd_sec}s|{ms}ms]"
+                else:
+                    time_str = f"[{ms}ms]"
+                right_parts.append(f"{ts} {time_str}")
                 right = "  ".join([p for p in right_parts if p])
-                header = build_header_line(left, right, color=args.color_header) + "\n"
-                frame = "\x1b[H\x1b[2J" + header + frame_body
+                header = build_header_line(left, right, color=args.color_header)
+                frame = "\x1b[H\x1b[2J" + header + "\n" + frame_body
+
+            # Aktualisiere die letzten Zeiten für update_display
+            last_cmd_time = cmd_time
+            last_proc_time = ms
 
             try:
                 sys.stdout.write(frame)
