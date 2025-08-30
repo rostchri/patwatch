@@ -121,10 +121,13 @@ def strip_punct(word: str) -> str:
     return re.sub(r'^[^\w\s]+|[^\w\s]+$', "", word)
 
 def apply_template(tmpl: str, m: Optional[re.Match]) -> str:
-    """Backrefs im Template via Match m ersetzen. Unterstützt: \1..\99, \g<name>, \\ \t \n \r."""
+    """Backrefs im Template via Match m ersetzen. Unterstützt: \1..\99, \g<name>, \\ \t \n \r.
+       Wenn m=None → Backrefs werden zu leerem String; Escapes bleiben wirksam.
+    """
     if m is None:
         s = tmpl.replace("\\t", "\t").replace("\\n", "\n").replace("\\r", "\r").replace("\\\\", "\\")
         return re.sub(r'\\(?:g<[^>]+>|\d+)', "", s)
+
     out = []; i = 0; s = tmpl; L = len(s)
     while i < L:
         ch = s[i]
@@ -137,15 +140,19 @@ def apply_template(tmpl: str, m: Optional[re.Match]) -> str:
             j = i
             while j < L and s[j].isdigit(): j += 1
             idx = int(s[i:j]) if j > i else None
-            try: out.append(m.group(idx) or "" if idx is not None else "")
-            except IndexError: out.append("")
+            try:
+                out.append(m.group(idx) or "" if idx is not None else "")
+            except IndexError:
+                out.append("")
             i = j; continue
         if c == 'g' and i + 1 < L and s[i+1] == '<':
             k = s.find('>', i+2)
             if k != -1:
                 name = s[i+2:k]
-                try: out.append(m.group(name) or "")
-                except Exception: out.append("")
+                try:
+                    out.append(m.group(name) or "")
+                except Exception:
+                    out.append("")
                 i = k + 1; continue
             out.append('\\g'); i += 1; continue
         if c == 't': out.append('\t'); i += 1; continue
@@ -171,7 +178,7 @@ _CALL_RE = re.compile(r'^([a-zA-Z_]\w*)\s*(?:\((.*)\))?$')
 
 def split_call(token: str):
     m = _CALL_RE.match(token)
-    if not m: return None, token
+    if not m: return None, token  # kein Funktionsaufruf → Template/Backref-Token
     name, args = m.group(1), (m.group(2) or "")
     out, cur, q, esc = [], [], None, False
     for ch in args:
@@ -190,33 +197,40 @@ def split_call(token: str):
 
 def apply_pipeline(word: str, pipeline: str, m: Optional[re.Match]) -> str:
     funcs = {
+        # String-Case
         "upper": lambda s: s.upper(),
         "lower": lambda s: s.lower(),
         "title": lambda s: s.title(),
         "swapcase": lambda s: s.swapcase(),
+        # Slicing
         "first": lambda s,n="1": s[:int(n)],
         "last":  lambda s,n="1": s[-int(n):] if s else s,
         "slice": lambda s,a="",b="": s[(int(a) if a!="" else None):(int(b) if b!="" else None)],
-        "subst": lambda s,a="",b="": s[(int(a) if a!="" else None):(int(b) if b!="" else None)],
+        "subst": lambda s,a="",b="": s[(int(a) if a!="" else None):(int(b) if b!="" else None)],  # Alias
+        # Trim/Whitespace
         "strip": lambda s,chs="": s.strip(chs) if chs else s.strip(),
         "lstrip": lambda s,chs="": s.lstrip(chs) if chs else s.lstrip(),
         "rstrip": lambda s,chs="": s.rstrip(chs) if chs else s.rstrip(),
         "collapse_ws": lambda s: " ".join(s.split()),
+        # Ersetzen
         "replace_str": lambda s,a,b: s.replace(a,b),
         "replace": lambda s,rx,repl,flag="": re.sub(rx, repl, s, flags=(re.I if ('i' in flag.lower()) else 0)),
         "tr": lambda s,src,dst: s.translate(str.maketrans(src, dst)),
+        # Split/Extract
         "split": lambda s,delim,idx="0": (s.split(delim)[int(idx)] if delim in s and len(s.split(delim))>int(idx) else ""),
         "rsplit": lambda s,delim,idx="0": (s.rsplit(delim)[int(idx)] if delim in s and len(s.rsplit(delim))>int(idx) else ""),
         "rextract": lambda s,rx,grp="1": (re.search(rx,s).group(int(grp)) if re.search(rx,s) else ""),
+        # Padding/Format
         "padleft": lambda s,w,ch=" ": s.rjust(int(w), ch[:1] if ch else " "),
         "padright": lambda s,w,ch=" ": s.ljust(int(w), ch[:1] if ch else " "),
         "zfill": lambda s,w: s.zfill(int(w)),
         "ensure_prefix": lambda s,p: s if s.startswith(p) else (p+s),
         "ensure_suffix": lambda s,p: s if s.endswith(p) else (s+p),
+        # Zahlen (best effort)
         "int": lambda s: str(int(float(s))) if s.strip() else s,
         "float": lambda s: str(float(s)) if s.strip() else s,
         "round": lambda s,d="0": (("{0:." + str(int(d)) + "f}").format(round(float(s), int(d)))) if s.strip() else s,
-        # Template-basierte Builder
+        # Mit Templates im Lauf setzen/anhängen
         "set": lambda s,expr: apply_template(expr, m),
         "append": lambda s,expr: s + apply_template(expr, m),
         "prepend": lambda s,expr: apply_template(expr, m) + s,
@@ -226,17 +240,17 @@ def apply_pipeline(word: str, pipeline: str, m: Optional[re.Match]) -> str:
     try:
         tokens = parse_pipeline(pipeline)
         for tok in tokens:
-            name_args = split_call(tok)
-            if name_args[0] is None:
-                # Kein Funktionsaufruf → als Template-Token interpretieren (Reset des Wortes)
-                word = apply_template(name_args[1], m)
+            call = split_call(tok)
+            if call[0] is None:
+                # Kein Funktionsaufruf → behandle als Template/Backref-Token (ersetzen)
+                word = apply_template(call[1], m)
                 continue
-            name, args = name_args
+            name, args = call
             f = funcs.get(name)
-            if not f:  # Unbekannt → überspringen
+            if not f:
                 continue
             if name in ("set","append","prepend","concat") and args:
-                word = f(word, args[0])  # set/append/prepend erwartet Template-Expr
+                word = f(word, args[0])  # apply_template passiert in Func
             else:
                 word = f(word, *args)
     except Exception:
@@ -259,12 +273,13 @@ class PatternRec:
         self.head_count = 0
         self.tail_max = max(0, lastw)
         self.tail = deque(maxlen=lastw) if lastw > 0 else deque()
-        self.alts: List[str] = []  # komplette Historie alternativer Wörter (für Alt-Ansicht)
+        self.alts: List[str] = []  # Historie alternativer Wörter (für Alt-Ansicht)
 
 def compile_rx(rx: str, flags: int) -> Pattern:
     return re.compile(rx, flags)
 
 def extract_word_and_match(line: str, pat: PatternRec, cg_sep: str) -> Tuple[str, Optional[re.Match]]:
+    """Gibt (Wort, Matchobjekt) zurück. Matchobjekt wird für Transforms/Backrefs in Spalte 5 genutzt."""
     if pat.word_re is not None:
         m = pat.word_re.search(line)
         if not m:
@@ -275,6 +290,7 @@ def extract_word_and_match(line: str, pat: PatternRec, cg_sep: str) -> Tuple[str
             parts = [g for g in m.groups() if g]
             return (cg_sep.join(parts) if parts else m.group(0)), m
         return m.group(0), m
+    # ohne WORD_REGEX
     return last_word(line), None
 
 def load_patterns(path: str, fs: str, flags: int, maxw: int, lastw: int) -> List[PatternRec]:
@@ -284,9 +300,8 @@ def load_patterns(path: str, fs: str, flags: int, maxw: int, lastw: int) -> List
             line = raw.rstrip("\n")
             if not line.strip(): continue
             if line.endswith("\r"): line = line[:-1]
-            # Kommentare ignorieren (Zeilen, die mit '#' beginnen — führende Spaces erlaubt)
-            if line.lstrip().startswith("#"): continue
-
+            if line.lstrip().startswith("#"):  # Kommentarzeilen ignorieren
+                continue
             parts = line.split(fs, 4)  # bis zu 5 Felder
             if len(parts) < 2:
                 sys.stderr.write(f"[WARN] Zeile {ln}: erwarte mind. 2 Felder (ID{fs}LINE_REGEX[ {fs}WORD_REGEX[ {fs}TEMPLATE[ {fs}TRANSFORMS ]]]). Übersprungen.\n")
@@ -329,14 +344,17 @@ def process_text(input_text: str, patterns: List[PatternRec], maxw: int, sep: st
                 pat.count += 1
                 w, m = extract_word_and_match(line, pat, cg_sep)
                 if strip_p and w: w = strip_punct(w)
+                # Transformiertes Alternativwort (Spalte 5; darf Backrefs als Quelle nutzen)
                 alt = apply_pipeline(w, pat.transforms, m) if pat.transforms else w
                 pat.alts.append(alt)
+                # Normal-Head/Tail
                 if w:
                     if pat.head_count < maxw:
                         pat.head.append(w); pat.head_count += 1
                     if pat.tail_max > 0:
                         pat.tail.append(w)
 
+    # Normalansicht rendern
     out_lines = []
     for pat in patterns:
         total = pat.count
@@ -431,6 +449,7 @@ def build_header_line(left: str, right: str, color: bool) -> str:
         sep = " " if (cols - len(left) - len(right)) > 0 else ""
         line = left + sep + right
     if color:
+        # schwarzer Text (30) auf tmux-dunkelgrünem Hintergrund (48;5;22)
         return f"\x1b[30;48;5;22m{line.ljust(cols)}\x1b[0m\n"
     return line + "\n"
 
@@ -490,35 +509,67 @@ def main():
     def one_frame():
         nonlocal alt_mode
 
-        # --cmd ausführen (nicht gemessen)
+        # --- 0) Hauptkommando (nicht in Laufzeitmessung enthalten) ---
         text = run_cmd(args.cmd, args.shell, args.timeout, args.no_warn) if args.cmd else sys.stdin.read()
 
-        # eigene Verarbeitungszeit messen (ohne Kommando-Laufzeiten)
-        t0 = time.perf_counter()
-        normal_out = process_text(text, patterns, args.maxw, sep, between, args.strip_punct, cg_sep)
-        content = render_alt_view(patterns, sep, between) if alt_mode else normal_out
-        t1 = time.perf_counter()
-        proc_ms = int((t1 - t0) * 1000)
+        # --- 1) Unsere Verarbeitungszeit starten ---
+        t_start = time.perf_counter()
 
-        # --auxcmd (nicht gemessen)
+        # Normalansicht vorbereiten (inkl. Match/Transform)
+        normal_out = process_text(text, patterns, args.maxw, sep, between, args.strip_punct, cg_sep)
+
+        # Inhalt je Modus (Alt-Rendering gehört zur „eigenen“ Verarbeitungszeit)
+        content = render_alt_view(patterns, sep, between) if alt_mode else normal_out
+
+        # Zwischensumme unserer Laufzeit bis hier
+        t_proc = time.perf_counter() - t_start
+
+        # --- 2) Aux-Kommando (wird NICHT mitgezählt) ---
         frame_body = content
         if args.auxcmd:
             aux_to = args.aux_timeout if args.aux_timeout is not None else args.timeout
             aux_out = run_cmd(args.auxcmd, args.shell, aux_to, args.no_warn)
+            # nach Aux wieder Zeit weiterzählen für das restliche Zusammenbauen
+            t_after_aux = time.perf_counter()
             sep_line = aux_sep + ("" if aux_sep.endswith("\n") else "\n")
             aux_block = sep_line + (aux_out if aux_out.endswith("\n") else aux_out + "\n")
             frame_body = (aux_block + content) if args.aux_before else (content + aux_block)
+            # Zeit für das Append addieren
+            t_proc += (time.perf_counter() - t_after_aux)
 
-        # Header (mit Runtime-Anhang in ms)
+        # --- 3) Header bauen (mit ms) & atomar ausgeben ---
         frame = frame_body
         if args.clear:
             left = (f"Every {args.interval:.1f}s: {args.cmd}" if args.cmd else "STDIN")
             mode_tag = " ALT" if alt_mode else ""
-            ts = now_str(args.utc) + f" [{proc_ms}ms]"
+            ts = now_str(args.utc)
+            ms = int(round(t_proc * 1000.0))
             right_parts = []
             if args.header or mode_tag:
                 right_parts.append((args.header + mode_tag).strip())
-            right_parts.append(ts)
+            right_parts.append(f"{ts} [{ms}ms]")
             right = "  ".join([p for p in right_parts if p])
             header = build_header_line(left, right, color=args.color_header) + "\n"
+            frame = "\x1b[H\x1b[2J" + header + frame_body
+
+        sys.stdout.write(frame); sys.stdout.flush()
+
+    if args.interval and args.interval > 0:
+        if not args.cmd:
+            sys.stderr.write("[ERROR] --interval erfordert --cmd (STDIN kann nicht periodisch gelesen werden).\n")
+            sys.exit(2)
+        try:
+            with KeyPoller() as kp:
+                while True:
+                    keys = kp.poll()
+                    if keys and 'a' in keys: alt_mode = not alt_mode
+                    one_frame()
+                    time.sleep(args.interval)
+        except KeyboardInterrupt:
+            pass
+    else:
+        one_frame()
+
+if __name__ == "__main__":
+    main()
 
