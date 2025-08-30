@@ -5,17 +5,27 @@ patwatch.py — Regex-Zähler mit watch-Style-Header, optionalem Zweitkommando,
 Anti-Flackern-Ausgabe und vielen Optionen.
 
 Pattern-Datei (Tab-getrennt):
-  ID<TAB>LINE_REGEX<TAB>WORD_REGEX(optional)
+  ID<TAB>LINE_REGEX<TAB>WORD_REGEX(optional)<TAB>TEMPLATE(optional)
 
-Funktionen:
-- Zählt pro ID die Match-Zeilen
-- Wort pro Match: WORD_REGEX (1. Gruppe bevorzugt) ODER letztes Wort der Zeile
+Wortbildung pro Match:
+- Wenn WORD_REGEX vorhanden:
+    * Wenn TEMPLATE (Spalte 4) gesetzt:
+        - Backrefs wie \1 \2 ... \10 und \g<name> werden durch die entsprechenden
+          Capture-Gruppen ersetzt; \\ \t \n \r werden als Literale interpretiert.
+    * Sonst (kein TEMPLATE):
+        - Gibt es Capture-Gruppen → alle Gruppen (1..n) werden mit --cg-sep
+          zusammengefügt (Default: ""), leere Gruppen werden übersprungen.
+        - Gibt es keine Gruppen → der gesamte Match (group 0).
+- Wenn keine WORD_REGEX vorhanden: das letzte Wort der Zeile.
+
+Weitere Features:
 - "erste N" (Head) + "letzte M" (Tail) ohne Überschneidung; Ellipse nur bei echter Lücke
 - Eingabe aus STDIN ODER via --cmd (inkl. Pipes)
 - Periodisch via --interval
 - Header (--clear/--color-header/--utc/--header) ohne Flackern
 - STDERR-Unterdrückung (--no-warn)
 - Aux-Kommando: --auxcmd (+ --aux-sep, --aux-timeout, --aux-before)
+- POSIX-Klassen wie [[:space:]] werden zu Python-RegEx konvertiert
 """
 
 import sys, re, argparse, subprocess, time, shutil
@@ -25,7 +35,7 @@ from typing import List, Optional, Pattern
 # ---------- CLI ----------
 def parse_args():
     p = argparse.ArgumentParser(description="Zeilen zählen & Wörter sammeln nach Regex-Patterns (pro ID).")
-    p.add_argument("-p","--patterns", required=True, help="Pattern-Datei: ID<TAB>LINE_REGEX<TAB>WORD_REGEX(optional)")
+    p.add_argument("-p","--patterns", required=True, help="Pattern-Datei: ID<TAB>LINE_REGEX<TAB>WORD_REGEX(optional)<TAB>TEMPLATE(optional)")
     p.add_argument("-m","--maxw", type=int, default=10, help="Max. #Head-Wörter (erste N Treffer)")
     p.add_argument("-l","--lastw", type=int, default=10, help="Max. #Tail-Wörter (letzte M Treffer)")
     p.add_argument("--sep", default=" ", help="Trennzeichen zwischen Wörtern (Default: ' ')")
@@ -33,6 +43,7 @@ def parse_args():
     p.add_argument("-i","--ignorecase", action="store_true", help="Case-insensitive Matching")
     p.add_argument("--strip-punct", action="store_true", help="Satzzeichen am Wortanfang/-ende entfernen")
     p.add_argument("--fs", default="\\t", help="Feldtrenner in Pattern-Datei (Default: '\\t')")
+    p.add_argument("--cg-sep", default="", help="Trenner beim Zusammenfügen MEHRERER Capture-Gruppen (wenn kein TEMPLATE)")
 
     # Hauptkommando / Watch
     p.add_argument("-c","--cmd", help="Shell-Kommando (Pipes erlaubt); dessen STDOUT wird ausgewertet.")
@@ -88,12 +99,64 @@ def last_word(line: str) -> str:
 def strip_punct(word: str) -> str:
     return re.sub(r'^[^\w\s]+|[^\w\s]+$', "", word)
 
+def apply_template(tmpl: str, m: re.Match) -> str:
+    """Ersetzt Backrefs in tmpl mittels Match m.
+       Unterstützt: \1..\9..\10, \g<name>, \\, \t, \n, \r.
+    """
+    out = []
+    i = 0
+    s = tmpl
+    L = len(s)
+    while i < L:
+        ch = s[i]
+        if ch != '\\':
+            out.append(ch); i += 1; continue
+        i += 1
+        if i >= L:
+            out.append('\\'); break
+        c = s[i]
+
+        # Numerische Backrefs \1 .. \99...
+        if c.isdigit():
+            j = i
+            while j < L and s[j].isdigit():
+                j += 1
+            idx = int(s[i:j]) if j > i else None
+            out.append(m.group(idx) or "" if idx is not None else "")
+            i = j
+            continue
+
+        # \g<name>
+        if c == 'g' and i + 1 < L and s[i+1] == '<':
+            j = i + 2
+            k = s.find('>', j)
+            if k != -1:
+                name = s[j:k]
+                out.append(m.groupdict().get(name, "") or m.group(name) if name in m.re.groupindex else "")
+                i = k + 1
+                continue
+            # kein '>' gefunden → literal
+            out.append('\\g'); i += 1; continue
+
+        # Standard-Escapes
+        if c == 't': out.append('\t'); i += 1; continue
+        if c == 'n': out.append('\n'); i += 1; continue
+        if c == 'r': out.append('\r'); i += 1; continue
+        if c == '\\': out.append('\\'); i += 1; continue
+
+        # Unbekanntes Escape -> nur Zeichen selbst
+        out.append(c); i += 1
+
+    return "".join(out)
+
 class PatternRec:
-    __slots__ = ("pid","line_re","word_re","count","head","head_count","tail","tail_max")
-    def __init__(self, pid: str, line_re: Pattern, word_re: Optional[Pattern], maxw: int, lastw: int):
+    __slots__ = ("pid","line_re","word_re","tmpl","count","head","head_count","tail","tail_max")
+    def __init__(self, pid: str, line_re: Pattern, word_re: Optional[Pattern], tmpl: str,
+                 maxw: int, lastw: int):
         self.pid = pid
         self.line_re = line_re
         self.word_re = word_re
+        self.tmpl = tmpl  # 4. Spalte (kann "")
         self.count = 0
         self.head: List[str] = []
         self.head_count = 0
@@ -103,15 +166,22 @@ class PatternRec:
 def compile_rx(rx: str, flags: int) -> Pattern:
     return re.compile(rx, flags)
 
-def pick_word(line: str, pat: PatternRec) -> str:
+def pick_word(line: str, pat: PatternRec, cg_sep: str) -> str:
+    """Erzeugt das Wort gemäß WORD_REGEX + optionaler TEMPLATE."""
     if pat.word_re is not None:
         m = pat.word_re.search(line)
-        if not m: return ""
-        if m.lastindex:
-            for gi in range(1, m.lastindex+1):
-                g = m.group(gi)
-                if g: return g
-            return m.group(1)
+        if not m:
+            return ""
+        # TEMPLATE gewählt → Backrefs anwenden
+        if pat.tmpl:
+            return apply_template(pat.tmpl, m)
+
+        # kein TEMPLATE → Standardlogik
+        if m.lastindex:  # es gibt Gruppen
+            parts = [g for g in m.groups() if g]  # leere Gruppen überspringen
+            if parts:
+                return cg_sep.join(parts)
+            return m.group(0)
         return m.group(0)
     return last_word(line)
 
@@ -122,13 +192,15 @@ def load_patterns(path: str, fs: str, flags: int, maxw: int, lastw: int) -> List
             line = raw.rstrip("\n")
             if not line.strip(): continue
             if line.endswith("\r"): line = line[:-1]
-            parts = line.split(fs, 2)
+            # bis zu 4 Spalten zulassen
+            parts = line.split(fs, 3)
             if len(parts) < 2:
-                sys.stderr.write(f"[WARN] Zeile {ln}: erwarte mind. 2 Felder (ID{fs}LINE_REGEX[ {fs}WORD_REGEX]). Übersprungen.\n")
+                sys.stderr.write(f"[WARN] Zeile {ln}: erwarte mind. 2 Felder (ID{fs}LINE_REGEX[ {fs}WORD_REGEX[ {fs}TEMPLATE ]]). Übersprungen.\n")
                 continue
             pid = parts[0].strip()
             line_rx = posix_to_py(parts[1])
-            word_rx = posix_to_py(parts[2]) if len(parts)>=3 and parts[2]!="" else None
+            word_rx = posix_to_py(parts[2]) if len(parts)>=3 and parts[2] != "" else None
+            tmpl = parts[3] if len(parts) >= 4 else ""
             if not pid or not line_rx:
                 sys.stderr.write(f"[WARN] Zeile {ln}: leere ID oder LINE_REGEX. Übersprungen.\n")
                 continue
@@ -142,11 +214,12 @@ def load_patterns(path: str, fs: str, flags: int, maxw: int, lastw: int) -> List
                 try: wre = compile_rx(word_rx, flags)
                 except re.error as e:
                     sys.stderr.write(f"[WARN] Zeile {ln}: ungültige WORD_REGEX '{parts[2]}': {e}. WORD_REGEX ignoriert.\n")
-            pats.append(PatternRec(pid, lre, wre, maxw, lastw))
+            pats.append(PatternRec(pid, lre, wre, tmpl, maxw, lastw))
     return pats
 
 # ---------- Kernverarbeitung ----------
-def process_text(input_text: str, patterns: List[PatternRec], maxw: int, sep: str, between: str, strip_p: bool) -> str:
+def process_text(input_text: str, patterns: List[PatternRec], maxw: int, sep: str, between: str,
+                 strip_p: bool, cg_sep: str) -> str:
     for pat in patterns:
         pat.count = 0
         pat.head.clear()
@@ -158,7 +231,7 @@ def process_text(input_text: str, patterns: List[PatternRec], maxw: int, sep: st
         for pat in patterns:
             if pat.line_re.search(line):
                 pat.count += 1
-                w = pick_word(line, pat)
+                w = pick_word(line, pat, cg_sep)
                 if strip_p and w:
                     w = strip_punct(w)
                 if w:
@@ -239,6 +312,7 @@ def main():
     fs = unescape(args.fs)
     sep = unescape(args.sep)
     between = unescape(args.between)
+    cg_sep = unescape(args.cg_sep)
     aux_sep = unescape(args.aux_sep)
     flags = re.IGNORECASE if args.ignorecase else 0
 
@@ -249,7 +323,7 @@ def main():
     def one_run():
         # 1) Daten holen & verarbeiten (erst rechnen, NICHT sofort clearn → kein Flackern)
         text = run_cmd(args.cmd, args.shell, args.timeout, args.no_warn) if args.cmd else sys.stdin.read()
-        main_out = process_text(text, patterns, args.maxw, sep, between, args.strip_punct)
+        main_out = process_text(text, patterns, args.maxw, sep, between, args.strip_punct, cg_sep)
 
         # 2) Aux-Output ggf. anhängen (Position via --aux-before)
         frame_body = main_out
