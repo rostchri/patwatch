@@ -405,57 +405,105 @@ def process_text(input_text: str, patterns: List[PatternRec], maxw: int, sep: st
 # ---------- Alternativ-Rendering (Terminalbreite, Mitte=between) ----------
 def render_alt_view(patterns: List[PatternRec], sep: str, between: str) -> str:
     cols = shutil.get_terminal_size(fallback=(80, 24)).columns
+    sep_len = len(sep)
+    between_len = len(between)
+
+    def join_len(words):
+        if not words:
+            return 0
+        return sum(len(w) for w in words) + sep_len * (len(words) - 1)
+
     lines = []
     for pat in patterns:
         prefix = f"{pat.pid}\t{pat.count}\t"
         avail = max(0, cols - len(prefix))
+        words = pat.alts
 
-        # Standard: Platz für links/rechts nur, wenn between überhaupt reinpasst
-        if avail > len(between):
-            left_cap = (avail - len(between)) // 2
-            right_cap = avail - len(between) - left_cap
-        else:
-            # Zu schmal: erstmal so tun, als gäbe es links/rechts keinen Platz
-            left_cap = right_cap = 0
+        # Nichts zu zeigen -> keine Punkte
+        if not words or avail <= 0:
+            lines.append(prefix + "\n")
+            continue
 
-        # Links füllen (früheste alternativen Wörter)
-        left_words, cur = [], 0
-        if left_cap > 0:
-            for w in pat.alts:
-                add = len(w) if not left_words else len(sep) + len(w)
-                if cur + add > left_cap:
+        full = sep.join(words)
+        if len(full) <= avail:
+            # Alles passt -> KEIN between
+            lines.append(prefix + full + ("\n" if not full.endswith("\n") else ""))
+            continue
+
+        # Overflow: wir suchen i (Prefix-Wörter) und j (Suffix-Wörter) mit i>0, j>0
+        # so dass len(prefix)+between_len+len(suffix) <= avail;
+        # Prioritäten: 1) max(i+j), 2) minimal |i-j| (möglichst mittig), 3) max. genutzte Breite
+        n = len(words)
+
+        # Precompute Prefix-/Suffix-Längen
+        pref_len = [0] * (n + 1)     # pref_len[i] = len(sep.join(words[:i]))
+        for i in range(1, n + 1):
+            pref_len[i] = pref_len[i - 1] + len(words[i - 1]) + (sep_len if i - 1 > 0 else 0)
+
+        suff_len = [0] * (n + 1)     # suff_len[j] = len(sep.join(words[n-j:]))
+        for j in range(1, n + 1):
+            suff_len[j] = suff_len[j - 1] + len(words[n - j]) + (sep_len if j - 1 > 0 else 0)
+
+        best = None  # tuple: (shown=i+j, balance=-abs(i-j), used_len, i, j)
+        # i: 1..n-1 (mind. 1 links, mind. 1 rechts bleiben), j: 1..n-i
+        for i in range(1, n):
+            left_len = pref_len[i]
+            # Mindestplatz: left + between muss passen, sonst nächster i
+            if left_len + between_len > avail:
+                break  # i wird nur größer -> kann nicht mehr passen
+            rem = avail - left_len - between_len
+            # finde größtes j (>=1) mit suff_len[j] <= rem und i+j < n (sonst wäre nichts ausgelassen)
+            # j_max per linearer Suche reicht, da n idR klein; sonst binäre Suche auf suff_len
+            j_max = 0
+            for j in range(1, n - i + 1):
+                if suff_len[j] <= rem:
+                    j_max = j
+                else:
                     break
-                left_words.append(w)
-                cur += add
-        left_count = len(left_words)
+            if j_max <= 0 or i + j_max >= n:
+                continue
+            used = left_len + between_len + suff_len[j_max]
+            cand = (i + j_max, -abs(i - j_max), used, i, j_max)
+            if (best is None) or (cand > best):
+                best = cand
 
-        # Rechts füllen (letzte alternativen Wörter), ohne Überschneidung
-        right_words_rev, cur = [], 0
-        if right_cap > 0:
-            i = len(pat.alts) - 1
-            while i >= left_count:
-                w = pat.alts[i]
-                add = len(w) if not right_words_rev else len(sep) + len(w)
-                if cur + add > right_cap:
-                    break
-                right_words_rev.append(w)
-                cur += add
-                i -= 1
-        right_words = list(reversed(right_words_rev))
+        if best:
+            _, _, _, i, j = best
+            left = sep.join(words[:i])
+            right = sep.join(words[n - j:])
+            content = left + between + right
+            lines.append(prefix + content + ("\n" if not content.endswith("\n") else ""))
+            continue
 
-        # WICHTIG: Wenn GAR KEIN Wort angezeigt wird, KEIN between ausgeben
-        if not left_words and not right_words:
-            content = ""  # weder Worte noch Trenner
-        else:
-            if avail <= len(between):
-                # extrem schmal: nur der (ggf. abgeschnittene) Trenner in der Mitte
-                content = between[:avail]
+        # Fallback: selbst "1 Wort links + between + 1 Wort rechts" passt nicht
+        # -> KEIN between; nimm so viel wie möglich nur von links ODER nur von rechts.
+        # Wähle die Seite, die mehr Zeichen unterbringt (Stabilitäts-Optik).
+        # Links:
+        i_max = 0
+        for i in range(1, n + 1):
+            if pref_len[i] <= avail:
+                i_max = i
             else:
-                content = sep.join(left_words) + between + sep.join(right_words)
+                break
+        left_only = sep.join(words[:i_max]) if i_max > 0 else ""
 
-        lines.append(prefix + content + ("\n" if not content.endswith("\n") else ""))
+        # Rechts:
+        j_max = 0
+        for j in range(1, n + 1):
+            if suff_len[j] <= avail:
+                j_max = j
+            else:
+                break
+        right_only = sep.join(words[n - j_max:]) if j_max > 0 else ""
+
+        # Entscheide nach genutzter Länge, bei Gleichstand: links bevorzugen
+        if len(left_only) >= len(right_only):
+            content = left_only
+        else:
+            content = right_only
+
+        lines.append(prefix + content + ("\n" if content and not content.endswith("\n") else "\n"))
     return "".join(lines)
-
 
 # ---------- Kommando & Header/Watch ----------
 def run_cmd(cmd: str, shell_path: str, timeout: Optional[float], no_warn: bool) -> str:
