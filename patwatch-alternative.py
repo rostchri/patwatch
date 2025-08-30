@@ -489,16 +489,26 @@ def build_palette() -> list[tuple[int, int]]:
 _PALETTE = build_palette()
 
 class _ColorAllocator:
-    """Sequenzieller Allokator: unterschiedliche Keys → unterschiedliche Farben (bis Palette erschöpft)."""
+    """Hash-basierter Allokator: Verwendet Hash-Funktion für deterministische aber gut verteilte Farben."""
     def __init__(self, palette):
         self.palette = list(palette)
         self.map = {}       # key -> palette index
-        self.next_idx = 0
+    
     def pair_for(self, key: str):
-        """Gibt (fg,bg) für den Key (typisch: Altwort) zurück; neues Paar bei Bedarf."""
+        """Gibt (fg,bg) für den Key zurück; Hash-basierte Farbauswahl für gute Verteilung."""
         if key not in self.map:
-            self.map[key] = self.next_idx % len(self.palette)
-            self.next_idx += 1
+            # Verwende Hash-Funktion für deterministische aber gut verteilte Farbauswahl
+            # Kombiniere verschiedene Hash-Aspekte für bessere Verteilung
+            hash_value = hash(key)
+            char_sum = sum(ord(c) for c in key)
+            length_factor = len(key)
+            
+            # Kombiniere verschiedene Faktoren für bessere Verteilung
+            combined_hash = (hash_value + char_sum * 31 + length_factor * 17) & 0xFFFFFFFF
+            
+            # Verwende modulo für Palette-Index
+            self.map[key] = combined_hash % len(self.palette)
+                
         return self.palette[self.map[key]]
 
 _COLOR_ALLOC = _ColorAllocator(_PALETTE)
