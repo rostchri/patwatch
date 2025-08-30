@@ -479,7 +479,7 @@ def _color_chip(word: str) -> str:
 
 def colorize_join(words: list[str]) -> str:
     chips = [_color_chip(w) for w in words if w]
-    # Im Color-Mode ohne sichtbaren Separator zwischen Chips
+    # Im Color-Mode bei alternativansicht ohne sichtbaren Separator zwischen Chips
     return "".join(chips)
 
 def colorize_join_with_keys(words: list[str], keys: list[str]) -> str:
@@ -490,7 +490,7 @@ def colorize_join_with_keys(words: list[str], keys: list[str]) -> str:
             continue
         key = keys[i] if i < len(keys) and keys[i] else w
         chips.append(_color_chip_key(w, key))
-    return "".join(chips)
+    return " ".join(chips)
 
 # ---------- Rendering (Normal & Alt) ----------
 def render_normal_view(patterns: List[PatternRec], sep: str, between: str, use_color: bool) -> str:
