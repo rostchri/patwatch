@@ -15,9 +15,11 @@ Extras:
 - Taste 'a' schaltet zwischen Normalansicht (Head/Tail) und Alternativansicht (Breiten-optimiert) um.
 - --color erzeugt farbige Wort-"Chips" mit ≥120 stabilen, gut lesbaren ANSI-256 Farbkombis (FG/BG),
   mit WCAG-orientierter Kontrastwahl (nie Schwarz auf starkem Rot/Blau).
+- Farben in der Normalansicht entsprechen den Farben der Alternativansicht:
+  Die Farbauswahl basiert auf dem Alternativ-Wort (Spalte 5); fehlt dieses, auf dem Originalwort.
 """
 
-import sys, re, argparse, subprocess, time, shutil, os, select, hashlib
+import sys, re, argparse, subprocess, time, shutil, os, select
 from collections import deque
 from typing import List, Optional, Pattern, Tuple
 
@@ -242,7 +244,7 @@ def apply_pipeline(word: str, pipeline: str, m: Optional[re.Match]) -> str:
 # ---------- Datenstruktur ----------
 class PatternRec:
     __slots__ = ("pid","line_re","word_re","tmpl","transforms",
-                 "count","head","head_count","tail","tail_max","alts")
+                 "count","head","head_keys","head_count","tail","tail_keys","tail_max","alts")
     def __init__(self, pid: str, line_re: Pattern, word_re: Optional[Pattern],
                  tmpl: str, transforms: str, maxw: int, lastw: int):
         self.pid = pid
@@ -252,9 +254,11 @@ class PatternRec:
         self.transforms = transforms  # 5. Spalte (Pipeline)
         self.count = 0
         self.head: List[str] = []
+        self.head_keys: List[str] = []   # Farb-Key je Head-Wort (Altwort dominiert)
         self.head_count = 0
         self.tail_max = max(0, lastw)
         self.tail = deque(maxlen=lastw) if lastw > 0 else deque()
+        self.tail_keys = deque(maxlen=lastw) if lastw > 0 else deque()  # Farb-Key je Tail-Wort
         self.alts: List[str] = []  # Historie alternativer Wörter (für Alt-Ansicht)
 
 def compile_rx(rx: str, flags: int) -> Pattern:
@@ -316,9 +320,12 @@ def process_text(input_text: str, patterns: List[PatternRec], maxw: int, sep: st
     for pat in patterns:
         pat.count = 0
         pat.head.clear()
+        pat.head_keys.clear()
         pat.head_count = 0
         pat.alts.clear()
-        if pat.tail_max > 0: pat.tail.clear()
+        if pat.tail_max > 0:
+            pat.tail.clear()
+            pat.tail_keys.clear()
 
     for line in input_text.splitlines():
         for pat in patterns:
@@ -332,9 +339,12 @@ def process_text(input_text: str, patterns: List[PatternRec], maxw: int, sep: st
                 # Normal-Head/Tail
                 if w:
                     if pat.head_count < maxw:
-                        pat.head.append(w); pat.head_count += 1
+                        pat.head.append(w)
+                        pat.head_keys.append(alt if alt else w)  # Farb-Key: Altwort dominiert
+                        pat.head_count += 1
                     if pat.tail_max > 0:
                         pat.tail.append(w)
+                        pat.tail_keys.append(alt if alt else w)  # parallel zu tail
 
     # Normalansicht (Plain; wird bei --color u. U. nicht genutzt)
     out_lines = []
@@ -345,13 +355,16 @@ def process_text(input_text: str, patterns: List[PatternRec], maxw: int, sep: st
         overlap = max(0, h + t - total)
 
         last_list: List[str] = []
+        last_keys: List[str] = []
         if t > 0:
             skipped = 0
-            for w in pat.tail:
+            # tail und tail_keys parallel behandeln
+            for w, k in zip(list(pat.tail), list(pat.tail_keys)):
                 if skipped < overlap:
                     skipped += 1
                     continue
                 last_list.append(w)
+                last_keys.append(k)
 
         shown_head = h
         shown_tail = len(last_list)
@@ -435,15 +448,48 @@ def build_palette() -> list[tuple[int, int]]:
 
 _PALETTE = build_palette()
 
+class _ColorAllocator:
+    """Sequenzieller Allokator: unterschiedliche Keys → unterschiedliche Farben (bis Palette erschöpft)."""
+    def __init__(self, palette):
+        self.palette = list(palette)
+        self.map = {}       # key -> palette index
+        self.next_idx = 0
+    def pair_for(self, key: str):
+        """Gibt (fg,bg) für den Key (typisch: Altwort) zurück; neues Paar bei Bedarf."""
+        if key not in self.map:
+            self.map[key] = self.next_idx % len(self.palette)
+            self.next_idx += 1
+        return self.palette[self.map[key]]
+
+_COLOR_ALLOC = _ColorAllocator(_PALETTE)
+
+def _color_chip_key(word: str, key: Optional[str] = None) -> str:
+    """Farbiges Chip-Rendering; Farbe anhand 'key' (z. B. Altwort) wählen."""
+    if not word:
+        return ""
+    fg, bg = _COLOR_ALLOC.pair_for(key if key is not None else word)
+    return f"\x1b[38;5;{fg};48;5;{bg}m{word}\x1b[0m"
+
 def _color_chip(word: str) -> str:
     if not word:
         return ""
-    h = int(hashlib.md5(word.encode("utf-8")).hexdigest(), 16)
-    fg, bg = _PALETTE[h % len(_PALETTE)]
+    # Standard: Farbe aus dem Wort selbst ableiten (Alt-Ansicht nutzt Altwörter direkt)
+    fg, bg = _COLOR_ALLOC.pair_for(word)
     return f"\x1b[38;5;{fg};48;5;{bg}m{word}\x1b[0m"
 
 def colorize_join(words: list[str]) -> str:
     chips = [_color_chip(w) for w in words if w]
+    # Im Color-Mode ohne sichtbaren Separator zwischen Chips
+    return "".join(chips)
+
+def colorize_join_with_keys(words: list[str], keys: list[str]) -> str:
+    """Wie colorize_join, aber Farbe wird aus keys[i] abgeleitet (Alt dominiert)."""
+    chips = []
+    for i, w in enumerate(words):
+        if not w:
+            continue
+        key = keys[i] if i < len(keys) and keys[i] else w
+        chips.append(_color_chip_key(w, key))
     return "".join(chips)
 
 # ---------- Rendering (Normal & Alt) ----------
@@ -456,13 +502,16 @@ def render_normal_view(patterns: List[PatternRec], sep: str, between: str, use_c
         overlap = max(0, h + t - total)
 
         last_list: List[str] = []
+        last_keys: List[str] = []
         if t > 0:
             skipped = 0
-            for w in pat.tail:
+            # tail und tail_keys parallel behandeln
+            for w, k in zip(list(pat.tail), list(pat.tail_keys)):
                 if skipped < overlap:
                     skipped += 1
                     continue
                 last_list.append(w)
+                last_keys.append(k)
 
         shown_head = h
         shown_tail = len(last_list)
@@ -471,13 +520,14 @@ def render_normal_view(patterns: List[PatternRec], sep: str, between: str, use_c
         if use_color:
             if pat.head and last_list:
                 if gap_exists:
-                    words = colorize_join(pat.head) + between + colorize_join(last_list)
+                    words = colorize_join_with_keys(pat.head, pat.head_keys) + between + \
+                            colorize_join_with_keys(last_list, last_keys)
                 else:
-                    words = colorize_join(pat.head + last_list)
+                    words = colorize_join_with_keys(pat.head + last_list, pat.head_keys + last_keys)
             elif pat.head:
-                words = colorize_join(pat.head)
+                words = colorize_join_with_keys(pat.head, pat.head_keys)
             else:
-                words = colorize_join(last_list)
+                words = colorize_join_with_keys(last_list, last_keys)
         else:
             if pat.head and last_list:
                 joiner = between if gap_exists else sep
@@ -716,3 +766,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
