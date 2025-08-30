@@ -64,9 +64,9 @@ def parse_args():
     # Farben
     p.add_argument("--color", action="store_true",
                    help="Farbige Wort-Chips (≥120 ANSI-256 Farbkombis). Ignoriert --sep; gilt in Normal- und Alt-Ansicht.")
-    
+
     args = p.parse_args()
-    
+
     # Validierung der Parameter
     if args.maxw < 0:
         sys.stderr.write("[ERROR] --maxw darf nicht negativ sein.\n")
@@ -83,7 +83,7 @@ def parse_args():
     if args.aux_timeout is not None and args.aux_timeout <= 0:
         sys.stderr.write("[ERROR] --aux-timeout muss positiv sein.\n")
         sys.exit(2)
-    
+
     return args
 
 def unescape(s: str) -> str:
@@ -270,7 +270,7 @@ def apply_pipeline(word: str, pipeline: str, m: Optional[re.Match]) -> str:
 
 # ---------- Datenstruktur ----------
 class PatternRec:
-    __slots__ = ("pid","line_re","word_re","tmpl","transforms","orig_ref",
+    __slots__ = ("pid","line_re","word_re","tmpl","transforms","orig_ref","found_refs",
                  "count","head","head_keys","head_count","tail","tail_keys","tail_max","alts","orig_words")
     def __init__(self, pid: str, line_re: Pattern, word_re: Optional[Pattern],
                  tmpl: str, transforms: str, maxw: int, lastw: int):
@@ -281,6 +281,7 @@ class PatternRec:
         self.transforms = transforms  # 5. Spalte (Pipeline)
         # Extrahiere Backreference aus Spalte 5 (z.B. \1, \2, etc.)
         self.orig_ref = ""
+        self.found_refs = set()  # Sammle alle gefundenen Backreferences
         if transforms:
             # Suche nach Backreferences wie \1, \2, etc.
             import re
@@ -373,6 +374,7 @@ def process_text(input_text: str, patterns: List[PatternRec], maxw: int, sep: st
         pat.head_count = 0
         pat.alts.clear()
         pat.orig_words.clear()  # Reset ursprüngliche Wörter
+        pat.found_refs.clear()  # Reset gefundene Backreferences
         if pat.tail_max > 0:
             pat.tail.clear()
             pat.tail_keys.clear()
@@ -385,6 +387,11 @@ def process_text(input_text: str, patterns: List[PatternRec], maxw: int, sep: st
                 if strip_p and w: w = strip_punct(w)
                 # Speichere ursprüngliches Wort für Legende
                 pat.orig_words.append(w)
+
+                # Speichere die evaluierte \1 Backreference für die Legende
+                if m and m.groups() and len(m.groups()) >= 1:
+                    pat.found_refs.add(m.group(1))  # \1 Backreference
+
                 # Transformiertes Alternativwort (Spalte 5; darf Backrefs als Quelle nutzen)
                 alt = apply_pipeline(w, pat.transforms, m) if pat.transforms else w
                 pat.alts.append(alt)
@@ -464,25 +471,25 @@ def _best_fg_for_bg(r: int, g: int, b: int) -> int:
     lum = _rel_lum_rgb(r, g, b)
     cr_black = _contrast(lum, 0.0)
     cr_white = _contrast(1.0, lum)
-    
+
     # Strikte Kontrast-Regeln für bessere Lesbarkeit
     # Mindestkontrast von 4.5 (WCAG AA) für gute Lesbarkeit
     min_contrast = 4.5
-    
+
     # Prüfe ob schwarzer Text lesbar wäre
     black_readable = cr_black >= min_contrast
     white_readable = cr_white >= min_contrast
-    
+
     # Wenn beide lesbar sind, wähle den besseren Kontrast
     if black_readable and white_readable:
         return 15 if cr_white >= cr_black else 16
-    
+
     # Wenn nur einer lesbar ist, verwende den lesbaren
     if black_readable:
         return 16
     if white_readable:
         return 15
-    
+
     # Fallback: Verwende weiß für dunkle Hintergründe, schwarz für helle
     return 15 if lum < 0.5 else 16
 
@@ -521,7 +528,7 @@ class _ColorAllocator:
     def __init__(self, palette):
         self.palette = list(palette)
         self.map = {}       # key -> palette index
-    
+
     def _deterministic_hash(self, key: str) -> int:
         """Deterministische Hash-Funktion für konsistente Farben bei jedem Programmstart."""
         # Verwende einen einfachen aber effektiven Hash-Algorithmus
@@ -530,21 +537,21 @@ class _ColorAllocator:
         for i, char in enumerate(key):
             # Kombiniere Zeichen-Code mit Position für bessere Verteilung
             hash_value = ((hash_value << 5) + hash_value + ord(char) * (i + 1)) & 0xFFFFFFFF
-        
+
         # Füge Länge hinzu für bessere Verteilung bei kurzen Strings
         hash_value = (hash_value + len(key) * 31) & 0xFFFFFFFF
-        
+
         return hash_value
-    
+
     def pair_for(self, key: str):
         """Gibt (fg,bg) für den Key zurück; deterministische Hash-basierte Farbauswahl."""
         if key not in self.map:
             # Verwende deterministische Hash-Funktion
             hash_value = self._deterministic_hash(key)
-            
+
             # Verwende modulo für Palette-Index
             self.map[key] = hash_value % len(self.palette)
-                
+
         return self.palette[self.map[key]]
 
 _COLOR_ALLOC = _ColorAllocator(_PALETTE)
@@ -624,25 +631,26 @@ def render_normal_view(patterns: List[PatternRec], sep: str, between: str, use_c
                 words = sep.join(last_list)
 
         out_lines.append(f"{pat.pid}\t{total}\t{words}")
-    
+
     # Füge Farb-Legende in die erste Zeile hinzu (auch in normaler Ansicht)
     if use_color:
         legend_items = []
         for pat in patterns:
             if pat.transforms and pat.orig_words:  # Nur Patterns mit Transformationen
-                # Verwende das erste alternative Wort als Referenz (nur ein Eintrag pro Pattern)
-                if pat.alts:
-                    alt_word = pat.alts[0]
-                    # Verwende das alternative Wort in Uppercase
-                    alternative_ref = alt_word.upper()
-                    colored_alt = _color_chip_key(alternative_ref, alt_word)
-                    legend_items.append(colored_alt)  # Alternatives Wort in Uppercase mit Farbe
-        
+                # Verwende alle gefundenen Backreferences für die Legende
+                if pat.found_refs:
+                    for ref in sorted(pat.found_refs):
+                        # Verwende die Backreference in Uppercase
+                        original_ref = ref.upper()
+                        alt_word = pat.alts[0] if pat.alts else ""
+                        colored_ref = _color_chip_key(original_ref, alt_word)
+                        legend_items.append(colored_ref)  # Backreference in Uppercase mit Farbe
+
         if legend_items:
             # Erstelle Legende am Anfang der Zeile
             legend_line = " ".join(legend_items)
             out_lines.insert(0, legend_line)
-    
+
     return "\n".join(out_lines) + ("\n" if out_lines else "")
 
 def render_alt_view(patterns: List[PatternRec], sep: str, between: str, use_color: bool, no_warn: bool = False) -> str:
@@ -719,41 +727,42 @@ def render_alt_view(patterns: List[PatternRec], sep: str, between: str, use_colo
         right_only = (j_color(words[n-j_max:]) if use_color else j_plain(words[n-j_max:]))
         content = left_only if len(left_only) >= len(right_only) else right_only
         lines.append(prefix + (content if content else "") + ("\n" if content else "\n"))
-    
+
     # Füge Farb-Legende in die erste Zeile hinzu
     if use_color:
         legend_items = []
         for pat in patterns:
             if pat.transforms and pat.orig_words:  # Nur Patterns mit Transformationen
-                # Verwende das erste alternative Wort als Referenz (nur ein Eintrag pro Pattern)
-                if pat.alts:
-                    alt_word = pat.alts[0]
-                    # Verwende das alternative Wort in Uppercase
-                    alternative_ref = alt_word.upper()
-                    colored_alt = _color_chip_key(alternative_ref, alt_word)
-                    legend_items.append(colored_alt)  # Alternatives Wort in Uppercase mit Farbe
-        
+                # Verwende alle gefundenen Backreferences für die Legende
+                if pat.found_refs:
+                    for ref in sorted(pat.found_refs):
+                        # Verwende die Backreference in Uppercase
+                        original_ref = ref.upper()
+                        alt_word = pat.alts[0] if pat.alts else ""
+                        colored_ref = _color_chip_key(original_ref, alt_word)
+                        legend_items.append(colored_ref)  # Backreference in Uppercase mit Farbe
+
         if legend_items:
             # Erstelle Legende am Anfang der Zeile
             legend_line = " ".join(legend_items) + "\n"
             lines.insert(0, legend_line)
-    
+
     return "".join(lines)
 
 # ---------- Kommando & Header/Watch ----------
 def run_cmd(cmd: str, shell_path: str, timeout: Optional[float], no_warn: bool) -> tuple[str, float]:
     if not cmd or not cmd.strip():
         return "", 0.0
-    
+
     try:
         # Validierung der Shell-Parameter
         if not os.path.exists(shell_path):
             sys.stderr.write(f"[ERROR] Shell '{shell_path}' nicht gefunden.\n")
             return "", 0.0
-        
+
         # Zeitmessung starten
         cmd_start = time.perf_counter()
-        
+
         completed = subprocess.run(
             [shell_path, "-c", cmd],
             check=False,
@@ -762,10 +771,10 @@ def run_cmd(cmd: str, shell_path: str, timeout: Optional[float], no_warn: bool) 
             text=True,
             timeout=timeout,
         )
-        
+
         # Zeitmessung beenden
         cmd_time = time.perf_counter() - cmd_start
-        
+
         if (not no_warn) and completed.returncode != 0 and completed.stderr:
             sys.stderr.write(f"[WARN] Kommando Exit {completed.returncode}: {completed.stderr}\n")
         return completed.stdout or "", cmd_time
@@ -885,7 +894,7 @@ def main():
 
         alt_mode = False  # Start im Normalmodus
         current_interval = args.interval if args.interval else 0  # Aktuelles Intervall
-        
+
         # Cache für die letzten verarbeiteten Daten
         last_text = ""
         last_normal_content = ""
@@ -896,13 +905,13 @@ def main():
         def update_display():
             """Nur die Anzeige aktualisieren, ohne neue Daten zu laden"""
             nonlocal alt_mode, current_interval, last_cmd_time, last_proc_time
-            
+
             # Verwende gecachte Inhalte
             if alt_mode:
                 content = last_alt_content
             else:
                 content = last_normal_content
-            
+
             # Header bauen & ausgeben
             frame = content
             if args.clear:
@@ -967,7 +976,7 @@ def main():
             last_normal_content = render_normal_view(patterns, sep, between, use_color=args.color) \
                                   if args.color else normal_out_plain
             last_alt_content = render_alt_view(patterns, sep, between, use_color=args.color, no_warn=args.no_warn)
-            
+
             # Aktuelle Ansicht wählen
             if alt_mode:
                 content = last_alt_content
@@ -1035,7 +1044,7 @@ def main():
                             if keys:
                                 # Verarbeite alle Zeichen im String
                                 for key in keys:
-                                    if key == 'a': 
+                                    if key == 'a':
                                         alt_mode = not alt_mode
                                         # Sofort nur die Anzeige umschalten (ohne neue Daten)
                                         update_display()
@@ -1054,13 +1063,13 @@ def main():
                                     elif key == 'q':
                                         # Programm beenden
                                         sys.exit(0)
-                                
+
                                 # Direkt zur nächsten Iteration, ohne weiteres Warten
                                 break
-                            
+
                             # Kurz warten (50ms) bevor nächste Tastaturprüfung
                             time.sleep(0.05)
-                        
+
                         # Wenn keine Tasten gedrückt wurden, normales Update
                         if time.time() - start_time >= current_interval:
                             one_frame()
@@ -1072,7 +1081,7 @@ def main():
                 sys.exit(1)
         else:
             one_frame()
-            
+
     except KeyboardInterrupt:
         sys.exit(0)
     except Exception as e:
