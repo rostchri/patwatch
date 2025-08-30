@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-patwatch-alternative-color.py — Regex-Zähler mit watch-Style-Header, Anti-Flackern,
+patwatch-alternative.py — Regex-Zähler mit watch-Style-Header, Anti-Flackern,
 Template (Spalte 4), Transform-Pipeline (Spalte 5 inkl. Backrefs als Quelle),
 Live-Toggle 'a' (Alternativansicht), Aux-Kommando, Laufzeitmessung
 und optionale Farbchips-Ausgabe (--color).
@@ -12,8 +12,9 @@ Pattern-TSV (Tab-getrennt):
 Extras:
 - Zeilen in der Pattern-Datei, die (nach optionalen Spaces) mit '#' beginnen, werden ignoriert.
 - Header zeigt rechts Timestamp (+ optional Custom-Header) und die reine Verarbeitungszeit in ms: "[123ms]".
-- Taste 'a' schaltet zwischen Normalansicht und Alternativansicht um.
-- --color erzeugt farbige Wort-"Chips" (mind. 120 256-Color-Paare), stabil per Wortinhalt.
+- Taste 'a' schaltet zwischen Normalansicht (Head/Tail) und Alternativansicht (Breiten-optimiert) um.
+- --color erzeugt farbige Wort-"Chips" mit ≥120 stabilen, gut lesbaren ANSI-256 Farbkombis (FG/BG),
+  mit WCAG-orientierter Kontrastwahl (nie Schwarz auf starkem Rot/Blau).
 """
 
 import sys, re, argparse, subprocess, time, shutil, os, select, hashlib
@@ -60,7 +61,7 @@ def parse_args():
 
     # Farben
     p.add_argument("--color", action="store_true",
-                   help="Farbige Wort-Chips (mind. 120 Farbkombis). Ignoriert --sep; Normal- und Alt-Ansicht farbig.")
+                   help="Farbige Wort-Chips (≥120 ANSI-256 Farbkombis). Ignoriert --sep; gilt in Normal- und Alt-Ansicht.")
     return p.parse_args()
 
 def unescape(s: str) -> str:
@@ -367,56 +368,69 @@ def process_text(input_text: str, patterns: List[PatternRec], maxw: int, sep: st
         out_lines.append(f"{pat.pid}\t{total}\t{words}")
     return "\n".join(out_lines) + ("\n" if out_lines else "")
 
-# ---------- Farben (ANSI 256) ----------
+# ---------- Farben (ANSI 256) mit Kontrast-Heuristik ----------
 def _xterm_rgb(code: int):
-    if 16 <= code <= 231:  # 6x6x6 color cube
+    if 16 <= code <= 231:  # 6x6x6 farbwürfel
         i = code - 16
         r = i // 36
         g = (i % 36) // 6
         b = i % 6
         conv = lambda v: 0 if v == 0 else 95 + (v - 1) * 40
         return (conv(r), conv(g), conv(b))
-    if 232 <= code <= 255:  # grayscale
+    if 232 <= code <= 255:  # grau
         v = 8 + 10 * (code - 232)
         return (v, v, v)
-    # basic 0..15 (fallback)
-    basic = [
-        (0,0,0),(205,0,0),(0,205,0),(205,205,0),(0,0,238),(205,0,205),
-        (0,205,205),(229,229,229),(127,127,127),(255,0,0),(0,255,0),
-        (255,255,0),(92,92,255),(255,0,255),(0,255,255),(255,255,255)
-    ]
-    return basic[code] if 0 <= code < 16 else (255,255,255)
+    return (255, 255, 255)
 
-def _luma(rgb):
-    r,g,b = rgb
-    return 0.2126*r + 0.7152*g + 0.0722*b
+def _srgb_to_linear(c: float) -> float:
+    c = c / 255.0
+    return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
 
-def build_palette() -> list[tuple[int,int]]:
-    """Erstellt >=120 (fg,bg) Paare mit gutem Kontrast."""
+def _rel_lum_rgb(r: int, g: int, b: int) -> float:
+    R = _srgb_to_linear(r); G = _srgb_to_linear(g); B = _srgb_to_linear(b)
+    return 0.2126 * R + 0.7152 * G + 0.0722 * B
+
+def _contrast(l1: float, l2: float) -> float:
+    if l1 < l2: l1, l2 = l2, l1
+    return (l1 + 0.05) / (l2 + 0.05)
+
+def _best_fg_for_bg(r: int, g: int, b: int) -> int:
+    """Wähle 15 (weiß) oder 16 (schwarz) – höchster Kontrast; nie Schwarz auf starkem Rot/Blau."""
+    lum = _rel_lum_rgb(r, g, b)
+    cr_black = _contrast(lum, 0.0)
+    cr_white = _contrast(1.0, lum)
+    dominant_red  = (r > g * 1.25) and (r > b * 1.25)
+    dominant_blue = (b > g * 1.25) and (b > r * 1.25)
+    if dominant_red or dominant_blue:
+        return 15  # weiß
+    return 15 if cr_white >= cr_black else 16
+
+def build_palette() -> list[tuple[int, int]]:
+    """Erzeuge (fg,bg)-Paare mit gutem Kontrast; mind. 120 Stück."""
     pairs = []
     for code in range(16, 232):
-        r,g,b = _xterm_rgb(code)
-        y = _luma((r,g,b))
-        if y < 35 or y > 235:   # meide extrem dunkel/hell
+        r, g, b = _xterm_rgb(code)
+        y8 = 0.2126 * r + 0.7152 * g + 0.0722 * b
+        if y8 < 25 or y8 > 245:
             continue
-        fg = 15 if y < 140 else 16   # weißer FG auf dunklerem BG, sonst schwarz
+        fg = _best_fg_for_bg(r, g, b)
         pairs.append((fg, code))
     for code in range(238, 247):
-        r,g,b = _xterm_rgb(code)
-        y = _luma((r,g,b))
-        fg = 15 if y < 140 else 16
+        r, g, b = _xterm_rgb(code)
+        fg = _best_fg_for_bg(r, g, b)
         pairs.append((fg, code))
-    if len(pairs) < 120:
+    seen, uniq = set(), []
+    for fg, bg in pairs:
+        if (fg, bg) not in seen:
+            uniq.append((fg, bg)); seen.add((fg, bg))
+    if len(uniq) < 120:
         for code in range(16, 232):
-            r,g,b = _xterm_rgb(code)
-            y = _luma((r,g,b))
-            fg = 15 if y < 140 else 16
-            pairs.append((fg, code))
-    uniq = []
-    seen = set()
-    for fg,bg in pairs:
-        if (fg,bg) not in seen:
-            uniq.append((fg,bg)); seen.add((fg,bg))
+            r, g, b = _xterm_rgb(code)
+            fg = _best_fg_for_bg(r, g, b)
+            if (fg, code) not in seen:
+                uniq.append((fg, code)); seen.add((fg, code))
+            if len(uniq) >= 120:
+                break
     return uniq[:240]
 
 _PALETTE = build_palette()
@@ -585,7 +599,7 @@ class KeyPoller:
     def __init__(self):
         self.enabled = sys.stdin.isatty()
         self.old = None
-        self.win = os.name == "nt"
+               self.win = os.name == "nt"
         if self.enabled and not self.win:
             import termios, tty
             self.termios = termios; self.tty = tty
