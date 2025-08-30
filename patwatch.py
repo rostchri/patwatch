@@ -1,31 +1,57 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-patwatch.py — Regex-Zähler mit watch-Style-Header, optionalem Zweitkommando,
-Anti-Flackern-Ausgabe und vielen Optionen.
+patwatch.py — Regex-Zähler mit watch-Style-Header, Anti-Flackern,
+Transform-Pipeline (5. Spalte), Live-Toggle 'a' für Alternativansicht,
+und Aux-Kommando.
 
-Pattern-Datei (Tab-getrennt):
-  ID<TAB>LINE_REGEX<TAB>WORD_REGEX(optional)<TAB>TEMPLATE(optional)
+Pattern-TSV:
+  ID<TAB>LINE_REGEX<TAB>WORD_REGEX(optional)<TAB>TEMPLATE(optional)<TAB>TRANSFORMS(optional)
 
 Wortbildung pro Match:
 - Wenn WORD_REGEX vorhanden:
-    * Wenn TEMPLATE (Spalte 4) gesetzt:
-        - Backrefs wie \1 \2 ... \10 und \g<name> werden durch die entsprechenden
-          Capture-Gruppen ersetzt; \\ \t \n \r werden als Literale interpretiert.
-    * Sonst (kein TEMPLATE):
-        - Gibt es Capture-Gruppen → alle Gruppen (1..n) werden mit --cg-sep
-          zusammengefügt (Default: ""), leere Gruppen werden übersprungen.
-        - Gibt es keine Gruppen → der gesamte Match (group 0).
-- Wenn keine WORD_REGEX vorhanden: das letzte Wort der Zeile.
+    * Mit TEMPLATE (Spalte 4): Backrefs \1..\10 und \g<name> + Escapes \\ \t \n \r.
+    * Ohne TEMPLATE: alle Capture-Groups (1..n) mit --cg-sep zusammen; wenn keine Gruppen → group(0).
+- Wenn keine WORD_REGEX: letztes Wort der Zeile.
 
-Weitere Features:
-- "erste N" (Head) + "letzte M" (Tail) ohne Überschneidung; Ellipse nur bei echter Lücke
-- Eingabe aus STDIN ODER via --cmd (inkl. Pipes)
-- Periodisch via --interval
-- Header (--clear/--color-header/--utc/--header) ohne Flackern
-- STDERR-Unterdrückung (--no-warn)
-- Aux-Kommando: --auxcmd (+ --aux-sep, --aux-timeout, --aux-before)
-- POSIX-Klassen wie [[:space:]] werden zu Python-RegEx konvertiert
+Pattern-Template-Beispiele:
+
+- Output-Zeilen: 
+   - `user=john.doe@example.com` 
+- Pattern: `Mail<TAB>user=<TAB>user=([^@\s]+)(@([^\s]+))?<TAB>\1 \2`
+- Output-Zeilen:
+   - `... SL 42 ... ID X9 ... NA 7 ... AL 3 ...`
+- Pattern: `Flex<TAB>^<TAB>(?=.*\bID (?P<id>\S+))(?=.*\bNA (?P<na>\d+))(?=.*\bAL (?P<al>\d+))(?=.*\bSL (?P<sl>\d+))<TAB>\g<sl>@\g<id> [NA=\g<na>,AL=\g<al>]`
+- Output-Zeilen: 
+   - `USER=alice (prod)`
+   - `USER=bob`
+- Pattern: `User<TAB>^USER=<TAB>USER=(\S+)( (\((\w+)\)))?<TAB>\1\2` (Gruppe \2 umfasst inklusive Leerzeichen den ganzen optionalen Block (Space + „(…)“). Ist er nicht vorhanden, wird \2 leer → keine überflüssigen Klammern/Leerzeichen.)
+- Wissenswertes zur Template-Spalte:
+  - **Backrefs:** `\1..\9..\10` (Achtung: `\10` ist **Gruppe 10**, nicht `\1` + „0“), `\g<name>` für named groups.
+  - **Escapes im Template:** `\\`, `\t`, `\n`, `\r` funktionieren.  
+    Für **literales** `\t`: `\\t`
+  - **Optionale Gruppen:** Sind sie **nicht gematcht**, setzt `patwatch` an der Stelle **leer** ein.  
+    Optionale Deko wie z. B. Klammern/Komma **nur dann**, wenn sie **in die optionalen Gruppen** sind
+  - **Wiederholte Gruppen** (z. B. `(…)+`) liefern in Python nur den **letzten** Treffer der Gruppe.  
+    Wenn mehrere entfernte Werte eingesammelt werden sollen, nutzt man **Lookaheads**
+    
+Transforms (Spalte 5):
+- Pipeline via |, z. B.:  upper() | replace(\s+,_ ,i) | slice(0,8)
+- Der erste Token darf ein Backref-/Template-String sein (z. B. "\2", "[\1]-\3").
+  Dann startet die Pipeline mit diesem String statt dem zuvor gebildeten Wort.
+- Zusätzlich: set()/append()/prepend()/concat() akzeptieren Template-Argumente.
+
+Wortbildung:
+- Ohne WORD_REGEX → letztes Wort der Zeile.
+- Mit WORD_REGEX:
+    * Mit TEMPLATE (Spalte 4): Wort via Backrefs (\1..\99, \g<name>), Escapes \\ \t \n \r.
+    * Ohne TEMPLATE: alle Capture-Gruppen (1..n) werden mit --cg-sep zusammengefügt (leere Gruppen übersprungen);
+      gibt es keine Gruppen → gesamter Match.
+
+Live-Ansicht (Taste 'a'):
+- Normalmodus: Head/Tail mit Lückenlogik und --between nur bei echter Lücke.
+- Alternativmodus: transformierte Kurz-Wörter; Terminalbreite wird maximal genutzt.
+  Links die frühesten, rechts die letzten Alt-Wörter; in der Mitte steht exakt --between.
 """
 
 import sys, re, argparse, subprocess, time, shutil
