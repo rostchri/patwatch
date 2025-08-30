@@ -33,11 +33,8 @@ Pattern-Template-Beispiele:
   - **Optionale Gruppen:** Sind sie **nicht gematcht**, setzt `patwatch` an der Stelle **leer** ein.  
     Optionale Deko wie z. B. Klammern/Komma **nur dann**, wenn sie **in die optionalen Gruppen** sind
   - **Wiederholte Gruppen** (z. B. `(…)+`) liefern in Python nur den **letzten** Treffer der Gruppe.  
-    Wenn mehrere entfernte Werte eingesammelt werden sollen, nutzt man **Lookaheads** wie in Beispiel 2/10.
-
-
-
-
+    Wenn mehrere entfernte Werte eingesammelt werden sollen, nutzt man **Lookaheads**
+    
 Transform-Pipeline (Spalte 5):
 - Beispiel:  upper() | replace(\s+,_ ,re) | slice(0,8)
 - Pro ID individuell; wird auf das erzeugte „Zeilen-Wort“ angewandt.
