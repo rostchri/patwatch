@@ -1,60 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-patwatch.py — Regex-Zähler mit watch-Style-Header, Anti-Flackern,
-Transform-Pipeline (5. Spalte), Live-Toggle 'a' für Alternativansicht,
-und Aux-Kommando.
+patwatch-alternative-color.py — Regex-Zähler mit watch-Style-Header, Anti-Flackern,
+Template (Spalte 4), Transform-Pipeline (Spalte 5 inkl. Backrefs als Quelle),
+Live-Toggle 'a' (Alternativansicht), Aux-Kommando, Laufzeitmessung
+und optionale Farbchips-Ausgabe (--color).
 
-Pattern-TSV:
+Pattern-TSV (Tab-getrennt):
   ID<TAB>LINE_REGEX<TAB>WORD_REGEX(optional)<TAB>TEMPLATE(optional)<TAB>TRANSFORMS(optional)
 
-Wortbildung pro Match:
-- Wenn WORD_REGEX vorhanden:
-    * Mit TEMPLATE (Spalte 4): Backrefs \1..\10 und \g<name> + Escapes \\ \t \n \r.
-    * Ohne TEMPLATE: alle Capture-Groups (1..n) mit --cg-sep zusammen; wenn keine Gruppen → group(0).
-- Wenn keine WORD_REGEX: letztes Wort der Zeile.
-
-Pattern-Template-Beispiele:
-
-- Output-Zeilen: 
-   - `user=john.doe@example.com` 
-- Pattern: `Mail<TAB>user=<TAB>user=([^@\s]+)(@([^\s]+))?<TAB>\1 \2`
-- Output-Zeilen:
-   - `... SL 42 ... ID X9 ... NA 7 ... AL 3 ...`
-- Pattern: `Flex<TAB>^<TAB>(?=.*\bID (?P<id>\S+))(?=.*\bNA (?P<na>\d+))(?=.*\bAL (?P<al>\d+))(?=.*\bSL (?P<sl>\d+))<TAB>\g<sl>@\g<id> [NA=\g<na>,AL=\g<al>]`
-- Output-Zeilen: 
-   - `USER=alice (prod)`
-   - `USER=bob`
-- Pattern: `User<TAB>^USER=<TAB>USER=(\S+)( (\((\w+)\)))?<TAB>\1\2` (Gruppe \2 umfasst inklusive Leerzeichen den ganzen optionalen Block (Space + „(…)“). Ist er nicht vorhanden, wird \2 leer → keine überflüssigen Klammern/Leerzeichen.)
-- Wissenswertes zur Template-Spalte:
-  - **Backrefs:** `\1..\9..\10` (Achtung: `\10` ist **Gruppe 10**, nicht `\1` + „0“), `\g<name>` für named groups.
-  - **Escapes im Template:** `\\`, `\t`, `\n`, `\r` funktionieren.  
-    Für **literales** `\t`: `\\t`
-  - **Optionale Gruppen:** Sind sie **nicht gematcht**, setzt `patwatch` an der Stelle **leer** ein.  
-    Optionale Deko wie z. B. Klammern/Komma **nur dann**, wenn sie **in die optionalen Gruppen** sind
-  - **Wiederholte Gruppen** (z. B. `(…)+`) liefern in Python nur den **letzten** Treffer der Gruppe.  
-    Wenn mehrere entfernte Werte eingesammelt werden sollen, nutzt man **Lookaheads**
-    
-Transforms (Spalte 5):
-- Pipeline via |, z. B.:  upper() | replace(\s+,_ ,i) | slice(0,8)
-- Der erste Token darf ein Backref-/Template-String sein (z. B. "\2", "[\1]-\3").
-  Dann startet die Pipeline mit diesem String statt dem zuvor gebildeten Wort.
-- Zusätzlich: set()/append()/prepend()/concat() akzeptieren Template-Argumente.
-
-Wortbildung:
-- Ohne WORD_REGEX → letztes Wort der Zeile.
-- Mit WORD_REGEX:
-    * Mit TEMPLATE (Spalte 4): Wort via Backrefs (\1..\99, \g<name>), Escapes \\ \t \n \r.
-    * Ohne TEMPLATE: alle Capture-Gruppen (1..n) werden mit --cg-sep zusammengefügt (leere Gruppen übersprungen);
-      gibt es keine Gruppen → gesamter Match.
-
-Live-Ansicht (Taste 'a'):
-- Normalmodus: Head/Tail mit Lückenlogik und --between nur bei echter Lücke.
-- Alternativmodus: transformierte Kurz-Wörter; Terminalbreite wird maximal genutzt.
-  Links die frühesten, rechts die letzten Alt-Wörter; in der Mitte steht exakt --between.
+Extras:
+- Zeilen in der Pattern-Datei, die (nach optionalen Spaces) mit '#' beginnen, werden ignoriert.
+- Header zeigt rechts Timestamp (+ optional Custom-Header) und die reine Verarbeitungszeit in ms: "[123ms]".
+- Taste 'a' schaltet zwischen Normalansicht und Alternativansicht um.
+- --color erzeugt farbige Wort-"Chips" (mind. 120 256-Color-Paare), stabil per Wortinhalt.
 """
 
-import sys, re, argparse, subprocess, time, shutil, os, select
+import sys, re, argparse, subprocess, time, shutil, os, select, hashlib
 from collections import deque
 from typing import List, Optional, Pattern, Tuple
 
@@ -95,6 +57,10 @@ def parse_args():
                    help="Eigenes Timeout (Sekunden) für --auxcmd. Default: --timeout.")
     p.add_argument("--aux-before", action="store_true",
                    help="Aux-Block vor dem Hauptblock ausgeben.")
+
+    # Farben
+    p.add_argument("--color", action="store_true",
+                   help="Farbige Wort-Chips (mind. 120 Farbkombis). Ignoriert --sep; Normal- und Alt-Ansicht farbig.")
     return p.parse_args()
 
 def unescape(s: str) -> str:
@@ -164,14 +130,8 @@ def apply_template(tmpl: str, m: Optional[re.Match]) -> str:
 
 # ---------- Transform-Pipeline ----------
 def parse_pipeline(s: str):
-    """Splitte die Transform-Pipeline an unescaped '|' und erhalte Backslashes.
-       Sonderfälle:
-         - '\|' -> literal '|'
-         - '\\' -> literal '\'
-       Sonst bleibt '\' erhalten (z.B. für Backrefs \1, \g<name>, etc.).
-    """
-    if not s:
-        return []
+    """Splitte Pipeline an unescaped '|'. Erhalte Backslashes; behandle nur '\|' und '\\' speziell."""
+    if not s: return []
     tokens, cur = [], []
     i, L = 0, len(s)
     while i < L:
@@ -184,7 +144,6 @@ def parse_pipeline(s: str):
                 elif nxt == '\\':
                     cur.append('\\'); i += 2; continue
                 else:
-                    # Backslash für etwas anderes (z.B. \1) -> erhalten
                     cur.append('\\'); i += 1; continue
             else:
                 cur.append('\\'); i += 1; continue
@@ -376,22 +335,27 @@ def process_text(input_text: str, patterns: List[PatternRec], maxw: int, sep: st
                     if pat.tail_max > 0:
                         pat.tail.append(w)
 
-    # Normalansicht rendern
+    # Normalansicht (Plain; wird bei --color u. U. nicht genutzt)
     out_lines = []
     for pat in patterns:
         total = pat.count
         h = pat.head_count
         t = len(pat.tail) if pat.tail_max > 0 else 0
         overlap = max(0, h + t - total)
+
         last_list: List[str] = []
         if t > 0:
             skipped = 0
             for w in pat.tail:
-                if skipped < overlap: skipped += 1; continue
+                if skipped < overlap:
+                    skipped += 1
+                    continue
                 last_list.append(w)
+
         shown_head = h
         shown_tail = len(last_list)
         gap_exists = (total > shown_head + shown_tail)
+
         if pat.head and last_list:
             joiner = between if gap_exists else sep
             words = sep.join(pat.head) + joiner + sep.join(last_list)
@@ -399,110 +363,186 @@ def process_text(input_text: str, patterns: List[PatternRec], maxw: int, sep: st
             words = sep.join(pat.head)
         else:
             words = sep.join(last_list)
+
         out_lines.append(f"{pat.pid}\t{total}\t{words}")
     return "\n".join(out_lines) + ("\n" if out_lines else "")
 
-# ---------- Alternativ-Rendering (Terminalbreite, Mitte=between) ----------
-def render_alt_view(patterns: List[PatternRec], sep: str, between: str) -> str:
+# ---------- Farben (ANSI 256) ----------
+def _xterm_rgb(code: int):
+    if 16 <= code <= 231:  # 6x6x6 color cube
+        i = code - 16
+        r = i // 36
+        g = (i % 36) // 6
+        b = i % 6
+        conv = lambda v: 0 if v == 0 else 95 + (v - 1) * 40
+        return (conv(r), conv(g), conv(b))
+    if 232 <= code <= 255:  # grayscale
+        v = 8 + 10 * (code - 232)
+        return (v, v, v)
+    # basic 0..15 (fallback)
+    basic = [
+        (0,0,0),(205,0,0),(0,205,0),(205,205,0),(0,0,238),(205,0,205),
+        (0,205,205),(229,229,229),(127,127,127),(255,0,0),(0,255,0),
+        (255,255,0),(92,92,255),(255,0,255),(0,255,255),(255,255,255)
+    ]
+    return basic[code] if 0 <= code < 16 else (255,255,255)
+
+def _luma(rgb):
+    r,g,b = rgb
+    return 0.2126*r + 0.7152*g + 0.0722*b
+
+def build_palette() -> list[tuple[int,int]]:
+    """Erstellt >=120 (fg,bg) Paare mit gutem Kontrast."""
+    pairs = []
+    for code in range(16, 232):
+        r,g,b = _xterm_rgb(code)
+        y = _luma((r,g,b))
+        if y < 35 or y > 235:   # meide extrem dunkel/hell
+            continue
+        fg = 15 if y < 140 else 16   # weißer FG auf dunklerem BG, sonst schwarz
+        pairs.append((fg, code))
+    for code in range(238, 247):
+        r,g,b = _xterm_rgb(code)
+        y = _luma((r,g,b))
+        fg = 15 if y < 140 else 16
+        pairs.append((fg, code))
+    if len(pairs) < 120:
+        for code in range(16, 232):
+            r,g,b = _xterm_rgb(code)
+            y = _luma((r,g,b))
+            fg = 15 if y < 140 else 16
+            pairs.append((fg, code))
+    uniq = []
+    seen = set()
+    for fg,bg in pairs:
+        if (fg,bg) not in seen:
+            uniq.append((fg,bg)); seen.add((fg,bg))
+    return uniq[:240]
+
+_PALETTE = build_palette()
+
+def _color_chip(word: str) -> str:
+    if not word:
+        return ""
+    h = int(hashlib.md5(word.encode("utf-8")).hexdigest(), 16)
+    fg, bg = _PALETTE[h % len(_PALETTE)]
+    return f"\x1b[38;5;{fg};48;5;{bg}m{word}\x1b[0m"
+
+def colorize_join(words: list[str]) -> str:
+    chips = [_color_chip(w) for w in words if w]
+    return " ".join(chips)
+
+# ---------- Rendering (Normal & Alt) ----------
+def render_normal_view(patterns: List[PatternRec], sep: str, between: str, use_color: bool) -> str:
+    out_lines = []
+    for pat in patterns:
+        total = pat.count
+        h = pat.head_count
+        t = len(pat.tail) if pat.tail_max > 0 else 0
+        overlap = max(0, h + t - total)
+
+        last_list: List[str] = []
+        if t > 0:
+            skipped = 0
+            for w in pat.tail:
+                if skipped < overlap:
+                    skipped += 1
+                    continue
+                last_list.append(w)
+
+        shown_head = h
+        shown_tail = len(last_list)
+        gap_exists = (total > shown_head + shown_tail)
+
+        if use_color:
+            if pat.head and last_list:
+                if gap_exists:
+                    words = colorize_join(pat.head) + between + colorize_join(last_list)
+                else:
+                    words = colorize_join(pat.head + last_list)
+            elif pat.head:
+                words = colorize_join(pat.head)
+            else:
+                words = colorize_join(last_list)
+        else:
+            if pat.head and last_list:
+                joiner = between if gap_exists else sep
+                words = sep.join(pat.head) + joiner + sep.join(last_list)
+            elif pat.head:
+                words = sep.join(pat.head)
+            else:
+                words = sep.join(last_list)
+
+        out_lines.append(f"{pat.pid}\t{total}\t{words}")
+    return "\n".join(out_lines) + ("\n" if out_lines else "")
+
+def render_alt_view(patterns: List[PatternRec], sep: str, between: str, use_color: bool) -> str:
     cols = shutil.get_terminal_size(fallback=(80, 24)).columns
-    sep_len = len(sep)
+    sep_len = (1 if use_color else len(sep))
     between_len = len(between)
 
-    def join_len(words):
-        if not words:
-            return 0
-        return sum(len(w) for w in words) + sep_len * (len(words) - 1)
+    def j_plain(ws): return sep.join(ws) if ws else ""
+    def j_color(ws): return colorize_join(ws)
 
     lines = []
     for pat in patterns:
         prefix = f"{pat.pid}\t{pat.count}\t"
         avail = max(0, cols - len(prefix))
         words = pat.alts
-
-        # Nichts zu zeigen -> keine Punkte
         if not words or avail <= 0:
-            lines.append(prefix + "\n")
-            continue
+            lines.append(prefix + "\n"); continue
 
-        full = sep.join(words)
+        # 1) Passt alles? (kein between)
+        full = (j_color(words) if use_color else j_plain(words))
         if len(full) <= avail:
-            # Alles passt -> KEIN between
             lines.append(prefix + full + ("\n" if not full.endswith("\n") else ""))
             continue
 
-        # Overflow: wir suchen i (Prefix-Wörter) und j (Suffix-Wörter) mit i>0, j>0
-        # so dass len(prefix)+between_len+len(suffix) <= avail;
-        # Prioritäten: 1) max(i+j), 2) minimal |i-j| (möglichst mittig), 3) max. genutzte Breite
+        # 2) Overflow → Mitte mit between auslassen (nie am Rand)
         n = len(words)
+        pref_len = [0]*(n+1)
+        for i in range(1, n+1):
+            pref_len[i] = pref_len[i-1] + len(words[i-1]) + (0 if i-1==0 else sep_len)
+        suff_len = [0]*(n+1)
+        for j in range(1, n+1):
+            suff_len[j] = suff_len[j-1] + len(words[n-j]) + (0 if j-1==0 else sep_len)
 
-        # Precompute Prefix-/Suffix-Längen
-        pref_len = [0] * (n + 1)     # pref_len[i] = len(sep.join(words[:i]))
-        for i in range(1, n + 1):
-            pref_len[i] = pref_len[i - 1] + len(words[i - 1]) + (sep_len if i - 1 > 0 else 0)
-
-        suff_len = [0] * (n + 1)     # suff_len[j] = len(sep.join(words[n-j:]))
-        for j in range(1, n + 1):
-            suff_len[j] = suff_len[j - 1] + len(words[n - j]) + (sep_len if j - 1 > 0 else 0)
-
-        best = None  # tuple: (shown=i+j, balance=-abs(i-j), used_len, i, j)
-        # i: 1..n-1 (mind. 1 links, mind. 1 rechts bleiben), j: 1..n-i
+        best = None  # (shown, -|balance|, used, i, j)
         for i in range(1, n):
             left_len = pref_len[i]
-            # Mindestplatz: left + between muss passen, sonst nächster i
-            if left_len + between_len > avail:
-                break  # i wird nur größer -> kann nicht mehr passen
+            if left_len + between_len > avail: break
             rem = avail - left_len - between_len
-            # finde größtes j (>=1) mit suff_len[j] <= rem und i+j < n (sonst wäre nichts ausgelassen)
-            # j_max per linearer Suche reicht, da n idR klein; sonst binäre Suche auf suff_len
             j_max = 0
             for j in range(1, n - i + 1):
-                if suff_len[j] <= rem:
-                    j_max = j
-                else:
-                    break
-            if j_max <= 0 or i + j_max >= n:
-                continue
+                if suff_len[j] <= rem: j_max = j
+                else: break
+            if j_max <= 0 or i + j_max >= n: continue
             used = left_len + between_len + suff_len[j_max]
             cand = (i + j_max, -abs(i - j_max), used, i, j_max)
-            if (best is None) or (cand > best):
-                best = cand
+            if (best is None) or (cand > best): best = cand
 
         if best:
-            _, _, _, i, j = best
-            left = sep.join(words[:i])
-            right = sep.join(words[n - j:])
-            content = left + between + right
+            _,_,_, i, j = best
+            left = words[:i]; right = words[n-j:]
+            left_s  = (j_color(left)  if use_color else j_plain(left))
+            right_s = (j_color(right) if use_color else j_plain(right))
+            content = left_s + between + right_s
             lines.append(prefix + content + ("\n" if not content.endswith("\n") else ""))
             continue
 
-        # Fallback: selbst "1 Wort links + between + 1 Wort rechts" passt nicht
-        # -> KEIN between; nimm so viel wie möglich nur von links ODER nur von rechts.
-        # Wähle die Seite, die mehr Zeichen unterbringt (Stabilitäts-Optik).
-        # Links:
+        # 3) Fallback: selbst "1 Wort + between + 1 Wort" passt nicht → kein between
         i_max = 0
-        for i in range(1, n + 1):
-            if pref_len[i] <= avail:
-                i_max = i
-            else:
-                break
-        left_only = sep.join(words[:i_max]) if i_max > 0 else ""
-
-        # Rechts:
+        for i in range(1, n+1):
+            if pref_len[i] <= avail: i_max = i
+            else: break
         j_max = 0
-        for j in range(1, n + 1):
-            if suff_len[j] <= avail:
-                j_max = j
-            else:
-                break
-        right_only = sep.join(words[n - j_max:]) if j_max > 0 else ""
-
-        # Entscheide nach genutzter Länge, bei Gleichstand: links bevorzugen
-        if len(left_only) >= len(right_only):
-            content = left_only
-        else:
-            content = right_only
-
-        lines.append(prefix + content + ("\n" if content and not content.endswith("\n") else "\n"))
+        for j in range(1, n+1):
+            if suff_len[j] <= avail: j_max = j
+            else: break
+        left_only  = (j_color(words[:i_max]) if use_color else j_plain(words[:i_max]))
+        right_only = (j_color(words[n-j_max:]) if use_color else j_plain(words[n-j_max:]))
+        content = left_only if len(left_only) >= len(right_only) else right_only
+        lines.append(prefix + (content if content else "") + ("\n" if content else "\n"))
     return "".join(lines)
 
 # ---------- Kommando & Header/Watch ----------
@@ -603,10 +643,14 @@ def main():
         t_start = time.perf_counter()
 
         # Normalansicht vorbereiten (inkl. Match/Transform)
-        normal_out = process_text(text, patterns, args.maxw, sep, between, args.strip_punct, cg_sep)
+        normal_out_plain = process_text(text, patterns, args.maxw, sep, between, args.strip_punct, cg_sep)
 
-        # Inhalt je Modus (Alt-Rendering gehört zur „eigenen“ Verarbeitungszeit)
-        content = render_alt_view(patterns, sep, between) if alt_mode else normal_out
+        # Inhalt je Modus (mit/ohne Farbe)
+        if alt_mode:
+            content = render_alt_view(patterns, sep, between, use_color=args.color)
+        else:
+            content = render_normal_view(patterns, sep, between, use_color=args.color) \
+                      if args.color else normal_out_plain
 
         # Zwischensumme unserer Laufzeit bis hier
         t_proc = time.perf_counter() - t_start
@@ -616,13 +660,11 @@ def main():
         if args.auxcmd:
             aux_to = args.aux_timeout if args.aux_timeout is not None else args.timeout
             aux_out = run_cmd(args.auxcmd, args.shell, aux_to, args.no_warn)
-            # nach Aux wieder Zeit weiterzählen für das restliche Zusammenbauen
             t_after_aux = time.perf_counter()
             sep_line = aux_sep + ("" if aux_sep.endswith("\n") else "\n")
             aux_block = sep_line + (aux_out if aux_out.endswith("\n") else aux_out + "\n")
             frame_body = (aux_block + content) if args.aux_before else (content + aux_block)
-            # Zeit für das Append addieren
-            t_proc += (time.perf_counter() - t_after_aux)
+            t_proc += (time.perf_counter() - t_after_aux)  # nur das Zusammenbauen addieren
 
         # --- 3) Header bauen (mit ms) & atomar ausgeben ---
         frame = frame_body
@@ -659,4 +701,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
