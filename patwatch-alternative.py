@@ -519,7 +519,23 @@ def build_palette() -> list[tuple[int, int]]:
                 uniq.append((fg, code)); seen.add((fg, code))
             if len(uniq) >= 120:
                 break
-    return uniq[:240]
+
+    # Filtere problematische Farbkombinationen aus
+    filtered = []
+    for fg, bg in uniq:
+        r, g, b = _xterm_rgb(bg)
+        # Vermeide dunkelblaue Hintergründe (schwer lesbar)
+        if r < 50 and g < 50 and b > 100:  # Dunkelblau
+            continue
+        # Vermeide sehr dunkle Hintergründe mit schwarzer Schrift
+        if fg == 16 and r < 30 and g < 30 and b < 30:  # Sehr dunkel mit schwarzer Schrift
+            continue
+        # Vermeide sehr helle Hintergründe mit weißer Schrift
+        if fg == 15 and r > 220 and g > 220 and b > 220:  # Sehr hell mit weißer Schrift
+            continue
+        filtered.append((fg, bg))
+
+    return filtered[:240]
 
 _PALETTE = build_palette()
 
@@ -635,16 +651,25 @@ def render_normal_view(patterns: List[PatternRec], sep: str, between: str, use_c
     # Füge Farb-Legende in die erste Zeile hinzu (auch in normaler Ansicht)
     if use_color:
         legend_items = []
+        # Sammle alle eindeutigen Backreferences (ursprüngliche Capture-Groups)
+        all_found_refs = set()
         for pat in patterns:
-            if pat.transforms and pat.orig_words:  # Nur Patterns mit Transformationen
-                # Verwende alle gefundenen Backreferences für die Legende
-                if pat.found_refs:
-                    for ref in sorted(pat.found_refs):
-                        # Verwende die Backreference in Uppercase
-                        original_ref = ref.upper()
-                        alt_word = pat.alts[0] if pat.alts else ""
-                        colored_ref = _color_chip_key(original_ref, alt_word)
-                        legend_items.append(colored_ref)  # Backreference in Uppercase mit Farbe
+            if pat.transforms and pat.found_refs:  # Nur Patterns mit Transformationen
+                all_found_refs.update(pat.found_refs)
+
+        # Erstelle Legende mit ursprünglichen Capture-Groups, aber mit Farben der transformierten Wörter
+        for ref in sorted(all_found_refs):
+            # Verwende die Backreference in Uppercase
+            original_ref = ref.upper()
+            # Finde das entsprechende transformierte Wort für diese Backreference
+            # und verwende dessen Farbe für das ursprüngliche Wort
+            for pat in patterns:
+                if pat.transforms and pat.found_refs and ref in pat.found_refs:
+                    # Verwende das erste transformierte Wort als Key für die Farbe
+                    if pat.alts:
+                        colored_ref = _color_chip_key(original_ref, pat.alts[0])
+                        legend_items.append(colored_ref)
+                        break
 
         if legend_items:
             # Erstelle Legende am Anfang der Zeile
@@ -731,16 +756,25 @@ def render_alt_view(patterns: List[PatternRec], sep: str, between: str, use_colo
     # Füge Farb-Legende in die erste Zeile hinzu
     if use_color:
         legend_items = []
+        # Sammle alle eindeutigen Backreferences (ursprüngliche Capture-Groups)
+        all_found_refs = set()
         for pat in patterns:
-            if pat.transforms and pat.orig_words:  # Nur Patterns mit Transformationen
-                # Verwende alle gefundenen Backreferences für die Legende
-                if pat.found_refs:
-                    for ref in sorted(pat.found_refs):
-                        # Verwende die Backreference in Uppercase
-                        original_ref = ref.upper()
-                        alt_word = pat.alts[0] if pat.alts else ""
-                        colored_ref = _color_chip_key(original_ref, alt_word)
-                        legend_items.append(colored_ref)  # Backreference in Uppercase mit Farbe
+            if pat.transforms and pat.found_refs:  # Nur Patterns mit Transformationen
+                all_found_refs.update(pat.found_refs)
+
+        # Erstelle Legende mit ursprünglichen Capture-Groups, aber mit Farben der transformierten Wörter
+        for ref in sorted(all_found_refs):
+            # Verwende die Backreference in Uppercase
+            original_ref = ref.upper()
+            # Finde das entsprechende transformierte Wort für diese Backreference
+            # und verwende dessen Farbe für das ursprüngliche Wort
+            for pat in patterns:
+                if pat.transforms and pat.found_refs and ref in pat.found_refs:
+                    # Verwende das erste transformierte Wort als Key für die Farbe
+                    if pat.alts:
+                        colored_ref = _color_chip_key(original_ref, pat.alts[0])
+                        legend_items.append(colored_ref)
+                        break
 
         if legend_items:
             # Erstelle Legende am Anfang der Zeile
