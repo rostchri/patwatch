@@ -651,7 +651,7 @@ def render_normal_view(patterns: List[PatternRec], sep: str, between: str, use_c
     # Füge Farb-Legende in die erste Zeile hinzu (auch in normaler Ansicht)
     if use_color:
         legend_items = []
-        # Sammle alle eindeutigen Backreferences (ursprüngliche Capture-Groups)
+        # Sammle alle eindeutigen ursprünglichen Capture-Groups
         all_found_refs = set()
         for pat in patterns:
             if pat.transforms and pat.found_refs:  # Nur Patterns mit Transformationen
@@ -659,7 +659,7 @@ def render_normal_view(patterns: List[PatternRec], sep: str, between: str, use_c
 
         # Erstelle Legende mit ursprünglichen Capture-Groups, aber mit Farben der transformierten Wörter
         for ref in sorted(all_found_refs):
-            # Verwende die Backreference in Uppercase
+            # Verwende die Backreference in Uppercase (der lange Name)
             original_ref = ref.upper()
             # Finde das entsprechende transformierte Wort für diese Backreference
             # und verwende dessen Farbe für das ursprüngliche Wort
@@ -756,7 +756,7 @@ def render_alt_view(patterns: List[PatternRec], sep: str, between: str, use_colo
     # Füge Farb-Legende in die erste Zeile hinzu
     if use_color:
         legend_items = []
-        # Sammle alle eindeutigen Backreferences (ursprüngliche Capture-Groups)
+        # Sammle alle eindeutigen ursprünglichen Capture-Groups
         all_found_refs = set()
         for pat in patterns:
             if pat.transforms and pat.found_refs:  # Nur Patterns mit Transformationen
@@ -764,7 +764,7 @@ def render_alt_view(patterns: List[PatternRec], sep: str, between: str, use_colo
 
         # Erstelle Legende mit ursprünglichen Capture-Groups, aber mit Farben der transformierten Wörter
         for ref in sorted(all_found_refs):
-            # Verwende die Backreference in Uppercase
+            # Verwende die Backreference in Uppercase (der lange Name)
             original_ref = ref.upper()
             # Finde das entsprechende transformierte Wort für diese Backreference
             # und verwende dessen Farbe für das ursprüngliche Wort
@@ -1067,6 +1067,10 @@ def main():
             if not args.cmd:
                 sys.stderr.write("[ERROR] --interval erfordert --cmd (STDIN kann nicht periodisch gelesen werden).\n")
                 sys.exit(2)
+
+            # SOFORT erste Ausführung beim Start
+            one_frame()
+
             try:
                 with KeyPoller() as kp:
                     while True:
