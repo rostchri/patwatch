@@ -35,22 +35,28 @@ Pattern-Template-Beispiele:
   - **Wiederholte Gruppen** (z. B. `(…)+`) liefern in Python nur den **letzten** Treffer der Gruppe.  
     Wenn mehrere entfernte Werte eingesammelt werden sollen, nutzt man **Lookaheads**
     
-Transform-Pipeline (Spalte 5):
-- Beispiel:  upper() | replace(\s+,_ ,re) | slice(0,8)
-- Pro ID individuell; wird auf das erzeugte „Zeilen-Wort“ angewandt.
-- (Auszug) Funktionen: upper, lower, first(n), last(n), slice(a,b), strip/lstrip/rstrip,
-  replace_str(old,new), replace(rx,repl,flag), collapse_ws, zfill, padleft/padright,
-  split/rsplit(delim,idx), rextract(rx,group), ensure_prefix/suffix, tr(src,dst)
+Transforms (Spalte 5):
+- Pipeline via |, z. B.:  upper() | replace(\s+,_ ,i) | slice(0,8)
+- Der erste Token darf ein Backref-/Template-String sein (z. B. "\2", "[\1]-\3").
+  Dann startet die Pipeline mit diesem String statt dem zuvor gebildeten Wort.
+- Zusätzlich: set()/append()/prepend()/concat() akzeptieren Template-Argumente.
 
-Live-Ansicht mit Taste 'a':
-- Normalmodus: Head/Tail mit --between nur bei Lücke (wie bisher).
-- Alternativmodus: transformierte Kurz-Wörter; Terminalbreite wird ausgenutzt.
-  Inhalt links (früheste), rechts (letzte), in der **Mitte** steht immer --between.
+Wortbildung:
+- Ohne WORD_REGEX → letztes Wort der Zeile.
+- Mit WORD_REGEX:
+    * Mit TEMPLATE (Spalte 4): Wort via Backrefs (\1..\99, \g<name>), Escapes \\ \t \n \r.
+    * Ohne TEMPLATE: alle Capture-Gruppen (1..n) werden mit --cg-sep zusammengefügt (leere Gruppen übersprungen);
+      gibt es keine Gruppen → gesamter Match.
+
+Live-Ansicht (Taste 'a'):
+- Normalmodus: Head/Tail mit Lückenlogik und --between nur bei echter Lücke.
+- Alternativmodus: transformierte Kurz-Wörter; Terminalbreite wird maximal genutzt.
+  Links die frühesten, rechts die letzten Alt-Wörter; in der Mitte steht exakt --between.
 """
 
 import sys, re, argparse, subprocess, time, shutil, os, select
 from collections import deque
-from typing import List, Optional, Pattern
+from typing import List, Optional, Pattern, Tuple
 
 # ---------- CLI ----------
 def parse_args():
@@ -60,7 +66,7 @@ def parse_args():
     p.add_argument("-m","--maxw", type=int, default=10, help="Max. #Head-Wörter (erste N Treffer)")
     p.add_argument("-l","--lastw", type=int, default=10, help="Max. #Tail-Wörter (letzte M Treffer)")
     p.add_argument("--sep", default=" ", help="Trennzeichen zwischen Wörtern (Default: ' ')")
-    p.add_argument("--between", default=" ... ", help="Trenner zwischen Head/Tail bzw. Mitte in Alternativansicht (Default: ' ... ')")
+    p.add_argument("--between", default=" ... ", help="Trenner zwischen Head/Tail bzw. Mitte in Alternativansicht")
     p.add_argument("-i","--ignorecase", action="store_true", help="Case-insensitive Matching")
     p.add_argument("--strip-punct", action="store_true", help="Satzzeichen am Wortanfang/-ende entfernen")
     p.add_argument("--fs", default="\\t", help="Feldtrenner in Pattern-Datei (Default: '\\t')")
@@ -97,15 +103,9 @@ def unescape(s: str) -> str:
 # ---------- POSIX-RegEx Klassen -> Python ----------
 _POSIX_RE = re.compile(r"\[\[:(alpha|digit|alnum|space|lower|upper|xdigit|word|punct):\]\]")
 _POSIX_MAP = {
-    "alpha": r"[A-Za-z]",
-    "digit": r"\d",
-    "alnum": r"[0-9A-Za-z]",
-    "space": r"\s",
-    "lower": r"[a-z]",
-    "upper": r"[A-Z]",
-    "xdigit": r"[0-9A-Fa-f]",
-    "word": r"\w",
-    "punct": r"[^\w\s]",
+    "alpha": r"[A-Za-z]", "digit": r"\d", "alnum": r"[0-9A-Za-z]",
+    "space": r"\s", "lower": r"[a-z]", "upper": r"[A-Z]",
+    "xdigit": r"[0-9A-Fa-f]", "word": r"\w", "punct": r"[^\w\s]",
 }
 def posix_to_py(rx: str) -> str:
     return _POSIX_RE.sub(lambda m: _POSIX_MAP[m.group(1)], rx)
@@ -120,8 +120,11 @@ def last_word(line: str) -> str:
 def strip_punct(word: str) -> str:
     return re.sub(r'^[^\w\s]+|[^\w\s]+$', "", word)
 
-def apply_template(tmpl: str, m: re.Match) -> str:
-    """Backrefs in tmpl mittels Match m ersetzen. Unterstützt: \1..\99, \g<name>, \\ \t \n \r."""
+def apply_template(tmpl: str, m: Optional[re.Match]) -> str:
+    """Backrefs im Template via Match m ersetzen. Unterstützt: \1..\99, \g<name>, \\ \t \n \r."""
+    if m is None:
+        s = tmpl.replace("\\t", "\t").replace("\\n", "\n").replace("\\r", "\r").replace("\\\\", "\\")
+        return re.sub(r'\\(?:g<[^>]+>|\d+)', "", s)
     out = []; i = 0; s = tmpl; L = len(s)
     while i < L:
         ch = s[i]
@@ -134,16 +137,15 @@ def apply_template(tmpl: str, m: re.Match) -> str:
             j = i
             while j < L and s[j].isdigit(): j += 1
             idx = int(s[i:j]) if j > i else None
-            out.append(m.group(idx) or "" if idx is not None else "")
+            try: out.append(m.group(idx) or "" if idx is not None else "")
+            except IndexError: out.append("")
             i = j; continue
         if c == 'g' and i + 1 < L and s[i+1] == '<':
             k = s.find('>', i+2)
             if k != -1:
                 name = s[i+2:k]
-                try:
-                    out.append(m.group(name) or "")
-                except IndexError:
-                    out.append("")
+                try: out.append(m.group(name) or "")
+                except Exception: out.append("")
                 i = k + 1; continue
             out.append('\\g'); i += 1; continue
         if c == 't': out.append('\t'); i += 1; continue
@@ -165,9 +167,11 @@ def parse_pipeline(s: str):
     if cur: tokens.append(''.join(cur).strip())
     return [t for t in tokens if t]
 
+_CALL_RE = re.compile(r'^([a-zA-Z_]\w*)\s*(?:\((.*)\))?$')
+
 def split_call(token: str):
-    m = re.match(r'^([a-zA-Z_]\w*)\s*(?:\((.*)\))?$', token)
-    if not m: return token, []
+    m = _CALL_RE.match(token)
+    if not m: return None, token
     name, args = m.group(1), (m.group(2) or "")
     out, cur, q, esc = [], [], None, False
     for ch in args:
@@ -184,7 +188,7 @@ def split_call(token: str):
     out = [a[1:-1] if (len(a)>=2 and a[0]==a[-1] and a[0] in "'\"") else a for a in out]
     return name.lower(), out
 
-def apply_pipeline(word: str, pipeline: str) -> str:
+def apply_pipeline(word: str, pipeline: str, m: Optional[re.Match]) -> str:
     funcs = {
         "upper": lambda s: s.upper(),
         "lower": lambda s: s.lower(),
@@ -193,6 +197,7 @@ def apply_pipeline(word: str, pipeline: str) -> str:
         "first": lambda s,n="1": s[:int(n)],
         "last":  lambda s,n="1": s[-int(n):] if s else s,
         "slice": lambda s,a="",b="": s[(int(a) if a!="" else None):(int(b) if b!="" else None)],
+        "subst": lambda s,a="",b="": s[(int(a) if a!="" else None):(int(b) if b!="" else None)],
         "strip": lambda s,chs="": s.strip(chs) if chs else s.strip(),
         "lstrip": lambda s,chs="": s.lstrip(chs) if chs else s.lstrip(),
         "rstrip": lambda s,chs="": s.rstrip(chs) if chs else s.rstrip(),
@@ -208,17 +213,32 @@ def apply_pipeline(word: str, pipeline: str) -> str:
         "zfill": lambda s,w: s.zfill(int(w)),
         "ensure_prefix": lambda s,p: s if s.startswith(p) else (p+s),
         "ensure_suffix": lambda s,p: s if s.endswith(p) else (s+p),
-        # einfache Zahlen-ops (best effort)
         "int": lambda s: str(int(float(s))) if s.strip() else s,
         "float": lambda s: str(float(s)) if s.strip() else s,
         "round": lambda s,d="0": (("{0:." + str(int(d)) + "f}").format(round(float(s), int(d)))) if s.strip() else s,
+        # Template-basierte Builder
+        "set": lambda s,expr: apply_template(expr, m),
+        "append": lambda s,expr: s + apply_template(expr, m),
+        "prepend": lambda s,expr: apply_template(expr, m) + s,
+        "concat": lambda s,expr: s + apply_template(expr, m),
     }
+
     try:
-        for tok in parse_pipeline(pipeline):
-            name, args = split_call(tok)
+        tokens = parse_pipeline(pipeline)
+        for tok in tokens:
+            name_args = split_call(tok)
+            if name_args[0] is None:
+                # Kein Funktionsaufruf → als Template-Token interpretieren (Reset des Wortes)
+                word = apply_template(name_args[1], m)
+                continue
+            name, args = name_args
             f = funcs.get(name)
-            if not f: continue
-            word = f(word, *args)
+            if not f:  # Unbekannt → überspringen
+                continue
+            if name in ("set","append","prepend","concat") and args:
+                word = f(word, args[0])  # set/append/prepend erwartet Template-Expr
+            else:
+                word = f(word, *args)
     except Exception:
         pass
     return word
@@ -233,7 +253,7 @@ class PatternRec:
         self.line_re = line_re
         self.word_re = word_re
         self.tmpl = tmpl
-        self.transforms = transforms  # 5. Spalte
+        self.transforms = transforms  # 5. Spalte (Pipeline)
         self.count = 0
         self.head: List[str] = []
         self.head_count = 0
@@ -244,18 +264,18 @@ class PatternRec:
 def compile_rx(rx: str, flags: int) -> Pattern:
     return re.compile(rx, flags)
 
-def pick_word(line: str, pat: PatternRec, cg_sep: str) -> str:
+def extract_word_and_match(line: str, pat: PatternRec, cg_sep: str) -> Tuple[str, Optional[re.Match]]:
     if pat.word_re is not None:
         m = pat.word_re.search(line)
-        if not m: return ""
+        if not m:
+            return "", None
         if pat.tmpl:
-            return apply_template(pat.tmpl, m)
+            return apply_template(pat.tmpl, m), m
         if m.lastindex:
             parts = [g for g in m.groups() if g]
-            if parts: return cg_sep.join(parts)
-            return m.group(0)
-        return m.group(0)
-    return last_word(line)
+            return (cg_sep.join(parts) if parts else m.group(0)), m
+        return m.group(0), m
+    return last_word(line), None
 
 def load_patterns(path: str, fs: str, flags: int, maxw: int, lastw: int) -> List[PatternRec]:
     pats: List[PatternRec] = []
@@ -264,6 +284,9 @@ def load_patterns(path: str, fs: str, flags: int, maxw: int, lastw: int) -> List
             line = raw.rstrip("\n")
             if not line.strip(): continue
             if line.endswith("\r"): line = line[:-1]
+            # Kommentare ignorieren (Zeilen, die mit '#' beginnen — führende Spaces erlaubt)
+            if line.lstrip().startswith("#"): continue
+
             parts = line.split(fs, 4)  # bis zu 5 Felder
             if len(parts) < 2:
                 sys.stderr.write(f"[WARN] Zeile {ln}: erwarte mind. 2 Felder (ID{fs}LINE_REGEX[ {fs}WORD_REGEX[ {fs}TEMPLATE[ {fs}TRANSFORMS ]]]). Übersprungen.\n")
@@ -304,19 +327,16 @@ def process_text(input_text: str, patterns: List[PatternRec], maxw: int, sep: st
         for pat in patterns:
             if pat.line_re.search(line):
                 pat.count += 1
-                w = pick_word(line, pat, cg_sep)
+                w, m = extract_word_and_match(line, pat, cg_sep)
                 if strip_p and w: w = strip_punct(w)
-                # Transformiertes Alternativwort
-                alt = apply_pipeline(w, pat.transforms) if pat.transforms else w
+                alt = apply_pipeline(w, pat.transforms, m) if pat.transforms else w
                 pat.alts.append(alt)
-                # Normal-Head/Tail
                 if w:
                     if pat.head_count < maxw:
                         pat.head.append(w); pat.head_count += 1
                     if pat.tail_max > 0:
                         pat.tail.append(w)
 
-    # Normalansicht-Rendering (Head/Tail mit Lücken-Logik)
     out_lines = []
     for pat in patterns:
         total = pat.count
@@ -348,10 +368,8 @@ def render_alt_view(patterns: List[PatternRec], sep: str, between: str) -> str:
     lines = []
     for pat in patterns:
         prefix = f"{pat.pid}\t{pat.count}\t"
-        # Verfügbarer Platz nach dem Prefix:
         avail = max(0, cols - len(prefix))
         if avail <= len(between):
-            # zu eng, nur Prefix + evtl. abgeschnittenes between
             content = between[:avail]
             lines.append(prefix + content + "\n")
             continue
@@ -367,7 +385,7 @@ def render_alt_view(patterns: List[PatternRec], sep: str, between: str) -> str:
             left_words.append(w); cur += add
         left_count = len(left_words)
 
-        # Rechts: letzte alt-Wörter (ohne Überschneidung mit links)
+        # Rechts: letzte alt-Wörter, ohne Überlappung
         right_words_rev, cur = [], 0
         i = len(pat.alts) - 1
         while i >= left_count:
@@ -471,13 +489,18 @@ def main():
 
     def one_frame():
         nonlocal alt_mode
-        # 1) Daten holen (erst rechnen, NICHT sofort clearn → kein Flackern)
-        text = run_cmd(args.cmd, args.shell, args.timeout, args.no_warn) if args.cmd else sys.stdin.read()
-        normal_out = process_text(text, patterns, args.maxw, sep, between, args.strip_punct, cg_sep)
-        # 2) Rendern je Modus
-        content = render_alt_view(patterns, sep, between) if alt_mode else normal_out
 
-        # 3) Aux-Block
+        # --cmd ausführen (nicht gemessen)
+        text = run_cmd(args.cmd, args.shell, args.timeout, args.no_warn) if args.cmd else sys.stdin.read()
+
+        # eigene Verarbeitungszeit messen (ohne Kommando-Laufzeiten)
+        t0 = time.perf_counter()
+        normal_out = process_text(text, patterns, args.maxw, sep, between, args.strip_punct, cg_sep)
+        content = render_alt_view(patterns, sep, between) if alt_mode else normal_out
+        t1 = time.perf_counter()
+        proc_ms = int((t1 - t0) * 1000)
+
+        # --auxcmd (nicht gemessen)
         frame_body = content
         if args.auxcmd:
             aux_to = args.aux_timeout if args.aux_timeout is not None else args.timeout
@@ -486,37 +509,16 @@ def main():
             aux_block = sep_line + (aux_out if aux_out.endswith("\n") else aux_out + "\n")
             frame_body = (aux_block + content) if args.aux_before else (content + aux_block)
 
-        # 4) Header bauen (falls --clear)
+        # Header (mit Runtime-Anhang in ms)
         frame = frame_body
         if args.clear:
             left = (f"Every {args.interval:.1f}s: {args.cmd}" if args.cmd else "STDIN")
             mode_tag = " ALT" if alt_mode else ""
-            right = "  ".join([p for p in (args.header + mode_tag if args.header or mode_tag else "", now_str(args.utc)) if p])
+            ts = now_str(args.utc) + f" [{proc_ms}ms]"
+            right_parts = []
+            if args.header or mode_tag:
+                right_parts.append((args.header + mode_tag).strip())
+            right_parts.append(ts)
+            right = "  ".join([p for p in right_parts if p])
             header = build_header_line(left, right, color=args.color_header) + "\n"
-            frame = "\x1b[H\x1b[2J" + header + frame_body
 
-        sys.stdout.write(frame)
-        sys.stdout.flush()
-
-    # Watch-Loop (+ Keypoll für 'a')
-    if args.interval and args.interval > 0:
-        if not args.cmd:
-            sys.stderr.write("[ERROR] --interval erfordert --cmd (STDIN kann nicht periodisch gelesen werden).\n")
-            sys.exit(2)
-        try:
-            with KeyPoller() as kp:
-                while True:
-                    # Key-Poll (nonblocking)
-                    keys = kp.poll()
-                    if keys:
-                        if 'a' in keys: alt_mode = not alt_mode
-                    one_frame()
-                    time.sleep(args.interval)
-        except KeyboardInterrupt:
-            pass
-    else:
-        # Einmalig (kein Toggle sinnvoll, da kein Refresh)
-        one_frame()
-
-if __name__ == "__main__":
-    main()
