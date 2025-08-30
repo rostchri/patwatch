@@ -1,0 +1,34 @@
+# Komplexe Log-Level Patterns mit verschiedenen Transformationen
+ERROR	ERROR	\w+		upper|first(3)
+INFO	INFO	\w+		lower|padleft(8)
+WARN	WARN	\w+		title|ensure_prefix(ALERT_)
+DEBUG	DEBUG	\w+		swapcase|last(4)
+
+# Service-Extraktion mit komplexen Pipelines
+UserService	\[UserService\]	\w+		upper|first(3)
+DatabaseService	\[DatabaseService\]	\w+		lower|padleft(12)
+PaymentService	\[PaymentService\]	\w+		title|ensure_prefix(PROD_)
+AuthService	\[AuthService\]	\w+		swapcase|first(5)
+NotificationService	\[NotificationService\]	\w+		upper|last(6)
+
+# Email-Extraktion mit Transformationen
+Email	email	\w+@\w+\.\w+		lower
+EmailDomain	email	\w+@(\w+\.\w+)	\1	upper|ensure_suffix(.COM)
+
+# Zahlen-Extraktion mit Formatierung
+Amount	amount=(\d+\.\d+)	\1		float|round(2)|padleft(8)
+Quantity	quantity=(\d+)	\1		int|zfill(4)|ensure_prefix(QTY_)
+TransactionID	transaction_id=(\w+)	\1	upper|first(6)|ensure_suffix(_TXN)
+
+# IP-Adressen mit Transformationen
+IP	IP=(\d+\.\d+\.\d+\.\d+)	\1		upper
+IPRange	IP=(\d+)\.\d+\.\d+\.\d+	\1		int|zfill(3)|ensure_prefix(IP_)
+
+# Zeitstempel-Extraktion
+Timestamp	\d{4}-\d{2}-\d{2}	\1		upper
+Hour	\d{4}-\d{2}-\d{2} (\d{2}):\d{2}:\d{2}	\1		int|zfill(2)|ensure_prefix(H_)
+
+# Status-Extraktion
+Status	successful	\w+		upper|ensure_prefix(STATUS_)
+Status	failed	\w+		upper|ensure_prefix(STATUS_)
+Status	timeout	\w+		upper|ensure_prefix(STATUS_)

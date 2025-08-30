@@ -1,0 +1,20 @@
+# Log-Level mit verschiedenen Transformationen
+ERROR	ERROR	\w+		upper
+INFO	INFO	\w+		lower
+WARN	WARN	\w+		title
+DEBUG	DEBUG	\w+		swapcase
+
+# Service-Extraktion mit komplexen Pipelines
+UserService	\[UserService\]	\w+		upper|first(3)
+DatabaseService	\[DatabaseService\]	\w+		lower|padleft(10)
+PaymentService	\[PaymentService\]	\w+		title|ensure_prefix(PROD_)
+
+# Email-Extraktion
+Email	email	\w+@\w+\.\w+		lower
+
+# Zahlen-Extraktion (ohne Capture-Groups in WORD_REGEX)
+Amount	amount=	\w+		upper
+Quantity	quantity=	\w+		lower
+
+# IP-Adressen (ohne Capture-Groups in WORD_REGEX)
+IP	IP=	\w+		upper

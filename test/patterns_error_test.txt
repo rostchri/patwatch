@@ -1,0 +1,8 @@
+# Gültige Patterns
+ERROR	ERROR	.*	\1	upper
+INFO	INFO	.*	\1	lower
+
+# Ungültige Patterns (für Fehlertests)
+BAD_REGEX	[invalid	\w+	\1	upper
+BAD_WORD_REGEX	ERROR	\1	\1	upper
+BAD_TRANSFORM	ERROR	\w+	\1	invalid_function
