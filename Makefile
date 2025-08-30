@@ -151,7 +151,7 @@ cmdrepeatcolor:
 	@echo ""
 	@echo "Starte in 3 Sekunden..."
 	@sleep 3
-	$(PYTHON) $(SCRIPT) -p $(TEST_DIR)/patterns_complex_color_fixed.txt -c "$(PYTHON) $(TEST_DIR)/dynamic_log_generator.py --timeout 0 | head -5" -t 1 --clear --color --header "TEST" --maxw 5 --lastw 3 --color-header
+	$(PYTHON) $(SCRIPT) -p $(TEST_DIR)/patterns_complex_color_fixed.txt -c "$(PYTHON) $(TEST_DIR)/dynamic_log_generator.py --timeout 0 | head -5" -t 1 --no-warn --clear --color --header "TEST" --maxw 5 --lastw 3 --color-header
 
 # Pipe-Test mit unendlichem Generator
 .PHONY: piperepeatcolorinfinite

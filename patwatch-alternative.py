@@ -628,9 +628,9 @@ def render_normal_view(patterns: List[PatternRec], sep: str, between: str, use_c
                 for orig_word, alt_word in zip(pat.orig_words, pat.alts):
                     if orig_word and orig_word not in seen_orig:
                         seen_orig.add(orig_word)
-                        # Verwende die Farbe des transformierten Worts für das ursprüngliche Wort
-                        colored_orig = _color_chip_key(orig_word, alt_word)
-                        legend_items.append(colored_orig)  # Nur das ursprüngliche Wort mit Farbe
+                        # Verwende die Farbe des transformierten Worts für das transformierte Wort
+                        colored_alt = _color_chip_key(alt_word, alt_word)
+                        legend_items.append(colored_alt)  # Das transformierte Wort mit Farbe
         
         if legend_items:
             # Erstelle Legende am Anfang der Zeile
@@ -725,9 +725,9 @@ def render_alt_view(patterns: List[PatternRec], sep: str, between: str, use_colo
                 for orig_word, alt_word in zip(pat.orig_words, pat.alts):
                     if orig_word and orig_word not in seen_orig:
                         seen_orig.add(orig_word)
-                        # Verwende die Farbe des transformierten Worts für das ursprüngliche Wort
-                        colored_orig = _color_chip_key(orig_word, alt_word)
-                        legend_items.append(colored_orig)  # Nur das ursprüngliche Wort mit Farbe
+                        # Verwende die Farbe des transformierten Worts für das transformierte Wort
+                        colored_alt = _color_chip_key(alt_word, alt_word)
+                        legend_items.append(colored_alt)  # Das transformierte Wort mit Farbe
         
         if legend_items:
             # Erstelle Legende am Anfang der Zeile
