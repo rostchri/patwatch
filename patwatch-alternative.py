@@ -990,7 +990,7 @@ def main():
             frame_body = content
             if args.auxcmd:
                 aux_to = args.aux_timeout if args.aux_timeout is not None else args.timeout
-                aux_out = run_cmd(args.auxcmd, args.shell, aux_to, args.no_warn)
+                aux_out, _ = run_cmd(args.auxcmd, args.shell, aux_to, args.no_warn)
                 t_after_aux = time.perf_counter()
                 sep_line = aux_sep + ("" if aux_sep.endswith("\n") else "\n")
                 aux_block = sep_line + (aux_out if aux_out.endswith("\n") else aux_out + "\n")
