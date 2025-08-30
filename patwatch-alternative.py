@@ -409,36 +409,53 @@ def render_alt_view(patterns: List[PatternRec], sep: str, between: str) -> str:
     for pat in patterns:
         prefix = f"{pat.pid}\t{pat.count}\t"
         avail = max(0, cols - len(prefix))
-        if avail <= len(between):
-            content = between[:avail]
-            lines.append(prefix + content + "\n")
-            continue
 
-        left_cap = (avail - len(between)) // 2
-        right_cap = avail - len(between) - left_cap
+        # Standard: Platz für links/rechts nur, wenn between überhaupt reinpasst
+        if avail > len(between):
+            left_cap = (avail - len(between)) // 2
+            right_cap = avail - len(between) - left_cap
+        else:
+            # Zu schmal: erstmal so tun, als gäbe es links/rechts keinen Platz
+            left_cap = right_cap = 0
 
-        # Links: früheste alt-Wörter
+        # Links füllen (früheste alternativen Wörter)
         left_words, cur = [], 0
-        for w in pat.alts:
-            add = len(w) if not left_words else len(sep) + len(w)
-            if cur + add > left_cap: break
-            left_words.append(w); cur += add
+        if left_cap > 0:
+            for w in pat.alts:
+                add = len(w) if not left_words else len(sep) + len(w)
+                if cur + add > left_cap:
+                    break
+                left_words.append(w)
+                cur += add
         left_count = len(left_words)
 
-        # Rechts: letzte alt-Wörter, ohne Überlappung
+        # Rechts füllen (letzte alternativen Wörter), ohne Überschneidung
         right_words_rev, cur = [], 0
-        i = len(pat.alts) - 1
-        while i >= left_count:
-            w = pat.alts[i]
-            add = len(w) if not right_words_rev else len(sep) + len(w)
-            if cur + add > right_cap: break
-            right_words_rev.append(w); cur += add
-            i -= 1
+        if right_cap > 0:
+            i = len(pat.alts) - 1
+            while i >= left_count:
+                w = pat.alts[i]
+                add = len(w) if not right_words_rev else len(sep) + len(w)
+                if cur + add > right_cap:
+                    break
+                right_words_rev.append(w)
+                cur += add
+                i -= 1
         right_words = list(reversed(right_words_rev))
 
-        content = sep.join(left_words) + between + sep.join(right_words)
+        # WICHTIG: Wenn GAR KEIN Wort angezeigt wird, KEIN between ausgeben
+        if not left_words and not right_words:
+            content = ""  # weder Worte noch Trenner
+        else:
+            if avail <= len(between):
+                # extrem schmal: nur der (ggf. abgeschnittene) Trenner in der Mitte
+                content = between[:avail]
+            else:
+                content = sep.join(left_words) + between + sep.join(right_words)
+
         lines.append(prefix + content + ("\n" if not content.endswith("\n") else ""))
     return "".join(lines)
+
 
 # ---------- Kommando & Header/Watch ----------
 def run_cmd(cmd: str, shell_path: str, timeout: Optional[float], no_warn: bool) -> str:
