@@ -75,8 +75,13 @@ def generate_log_line():
     action = random.choice(SERVICES[service])
     status = random.choices(list(STATUSES.keys()), weights=list(STATUSES.values()))[0]
     
+    # Zufällig ein Betriebssystem hinzufügen
+    os_name = random.choice(OPERATING_SYSTEMS) if random.random() < 0.3 else ""
+    
     # Basis-Log-Zeile
     log_line = f"{timestamp} {status.upper()} [{service}] {action}"
+    if os_name:
+        log_line += f" on {os_name}"
     
     # Service-spezifische Details hinzufügen
     if service == "UserService":
