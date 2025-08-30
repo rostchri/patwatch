@@ -1,0 +1,11 @@
+# Einfache Wort-Extraktion - ohne Template
+ERROR	ERROR	\w+		
+INFO	INFO	\w+		
+WARN	WARN	\w+		
+DEBUG	DEBUG	\w+		
+
+# Mit Transformationen
+ERROR_UPPER	ERROR	\w+		upper
+INFO_LOWER	INFO	\w+		lower
+WARN_TITLE	WARN	\w+		title
+DEBUG_SWAP	DEBUG	\w+		swapcase

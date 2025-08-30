@@ -64,7 +64,27 @@ def parse_args():
     # Farben
     p.add_argument("--color", action="store_true",
                    help="Farbige Wort-Chips (≥120 ANSI-256 Farbkombis). Ignoriert --sep; gilt in Normal- und Alt-Ansicht.")
-    return p.parse_args()
+    
+    args = p.parse_args()
+    
+    # Validierung der Parameter
+    if args.maxw < 0:
+        sys.stderr.write("[ERROR] --maxw darf nicht negativ sein.\n")
+        sys.exit(2)
+    if args.lastw < 0:
+        sys.stderr.write("[ERROR] --lastw darf nicht negativ sein.\n")
+        sys.exit(2)
+    if args.interval < 0:
+        sys.stderr.write("[ERROR] --interval darf nicht negativ sein.\n")
+        sys.exit(2)
+    if args.timeout is not None and args.timeout <= 0:
+        sys.stderr.write("[ERROR] --timeout muss positiv sein.\n")
+        sys.exit(2)
+    if args.aux_timeout is not None and args.aux_timeout <= 0:
+        sys.stderr.write("[ERROR] --aux-timeout muss positiv sein.\n")
+        sys.exit(2)
+    
+    return args
 
 def unescape(s: str) -> str:
     return s.encode("utf-8").decode("unicode_escape")
@@ -90,7 +110,7 @@ def strip_punct(word: str) -> str:
     return re.sub(r'^[^\w\s]+|[^\w\s]+$', "", word)
 
 def apply_template(tmpl: str, m: Optional[re.Match]) -> str:
-    """Backrefs im Template via Match m ersetzen. Unterstützt: \1..\99, \g<name>, \\ \t \n \r.
+    """Backrefs im Template via Match m ersetzen. Unterstützt: \\1..\\99, \\g<name>, \\\\ \\t \\n \\r.
        Wenn m=None → Backrefs werden zu leerem String; Escapes bleiben wirksam.
     """
     if m is None:
@@ -133,7 +153,7 @@ def apply_template(tmpl: str, m: Optional[re.Match]) -> str:
 
 # ---------- Transform-Pipeline ----------
 def parse_pipeline(s: str):
-    """Splitte Pipeline an unescaped '|'. Erhalte Backslashes; behandle nur '\|' und '\\' speziell."""
+    """Splitte Pipeline an unescaped '|'. Erhalte Backslashes; behandle nur '\\|' und '\\\\' speziell."""
     if not s: return []
     tokens, cur = [], []
     i, L = 0, len(s)
@@ -237,8 +257,15 @@ def apply_pipeline(word: str, pipeline: str, m: Optional[re.Match]) -> str:
                 word = f(word, args[0])  # apply_template passiert in Func
             else:
                 word = f(word, *args)
-    except Exception:
-        pass
+    except (ValueError, TypeError, IndexError) as e:
+        # Spezifische Fehler für ungültige Argumente oder Indizes
+        sys.stderr.write(f"[WARN] Transform-Pipeline Fehler: {e}. Wort unverändert gelassen.\n")
+    except re.error as e:
+        # Regex-Fehler in replace oder rextract
+        sys.stderr.write(f"[WARN] Regex-Fehler in Transform-Pipeline: {e}. Wort unverändert gelassen.\n")
+    except Exception as e:
+        # Andere unerwartete Fehler
+        sys.stderr.write(f"[WARN] Unerwarteter Fehler in Transform-Pipeline: {e}. Wort unverändert gelassen.\n")
     return word
 
 # ---------- Datenstruktur ----------
@@ -281,36 +308,49 @@ def extract_word_and_match(line: str, pat: PatternRec, cg_sep: str) -> Tuple[str
 
 def load_patterns(path: str, fs: str, flags: int, maxw: int, lastw: int) -> List[PatternRec]:
     pats: List[PatternRec] = []
-    with open(path, "r", encoding="utf-8") as f:
-        for ln, raw in enumerate(f, 1):
-            line = raw.rstrip("\n")
-            if not line.strip(): continue
-            if line.endswith("\r"): line = line[:-1]
-            if line.lstrip().startswith("#"):  # Kommentarzeilen ignorieren
-                continue
-            parts = line.split(fs, 4)  # bis zu 5 Felder
-            if len(parts) < 2:
-                sys.stderr.write(f"[WARN] Zeile {ln}: erwarte mind. 2 Felder (ID{fs}LINE_REGEX[ {fs}WORD_REGEX[ {fs}TEMPLATE[ {fs}TRANSFORMS ]]]). Übersprungen.\n")
-                continue
-            pid = parts[0].strip()
-            line_rx = posix_to_py(parts[1])
-            word_rx = posix_to_py(parts[2]) if len(parts)>=3 and parts[2] != "" else None
-            tmpl = parts[3] if len(parts) >= 4 else ""
-            transforms = parts[4] if len(parts) >= 5 else ""
-            if not pid or not line_rx:
-                sys.stderr.write(f"[WARN] Zeile {ln}: leere ID oder LINE_REGEX. Übersprungen.\n")
-                continue
-            try:
-                lre = compile_rx(line_rx, flags)
-            except re.error as e:
-                sys.stderr.write(f"[WARN] Zeile {ln}: ungültige LINE_REGEX '{parts[1]}': {e}. Übersprungen.\n")
-                continue
-            wre = None
-            if word_rx is not None:
-                try: wre = compile_rx(word_rx, flags)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for ln, raw in enumerate(f, 1):
+                line = raw.rstrip("\n")
+                if not line.strip(): continue
+                if line.endswith("\r"): line = line[:-1]
+                if line.lstrip().startswith("#"):  # Kommentarzeilen ignorieren
+                    continue
+                parts = line.split(fs, 4)  # bis zu 5 Felder
+                if len(parts) < 2:
+                    sys.stderr.write(f"[WARN] Zeile {ln}: erwarte mind. 2 Felder (ID{fs}LINE_REGEX[ {fs}WORD_REGEX[ {fs}TEMPLATE[ {fs}TRANSFORMS ]]]). Übersprungen.\n")
+                    continue
+                pid = parts[0].strip()
+                line_rx = posix_to_py(parts[1])
+                word_rx = posix_to_py(parts[2]) if len(parts)>=3 and parts[2] != "" else None
+                tmpl = parts[3] if len(parts) >= 4 else ""
+                transforms = parts[4] if len(parts) >= 5 else ""
+                if not pid or not line_rx:
+                    sys.stderr.write(f"[WARN] Zeile {ln}: leere ID oder LINE_REGEX. Übersprungen.\n")
+                    continue
+                try:
+                    lre = compile_rx(line_rx, flags)
                 except re.error as e:
-                    sys.stderr.write(f"[WARN] Zeile {ln}: ungültige WORD_REGEX '{parts[2]}': {e}. WORD_REGEX ignoriert.\n")
-            pats.append(PatternRec(pid, lre, wre, tmpl, transforms, maxw, lastw))
+                    sys.stderr.write(f"[WARN] Zeile {ln}: ungültige LINE_REGEX '{parts[1]}': {e}. Übersprungen.\n")
+                    continue
+                wre = None
+                if word_rx is not None:
+                    try: wre = compile_rx(word_rx, flags)
+                    except re.error as e:
+                        sys.stderr.write(f"[WARN] Zeile {ln}: ungültige WORD_REGEX '{parts[2]}': {e}. WORD_REGEX ignoriert.\n")
+                pats.append(PatternRec(pid, lre, wre, tmpl, transforms, maxw, lastw))
+    except FileNotFoundError:
+        sys.stderr.write(f"[ERROR] Pattern-Datei '{path}' nicht gefunden.\n")
+        return []
+    except PermissionError:
+        sys.stderr.write(f"[ERROR] Keine Berechtigung zum Lesen der Pattern-Datei '{path}'.\n")
+        return []
+    except UnicodeDecodeError as e:
+        sys.stderr.write(f"[ERROR] Unicode-Fehler beim Lesen der Pattern-Datei '{path}': {e}\n")
+        return []
+    except Exception as e:
+        sys.stderr.write(f"[ERROR] Unerwarteter Fehler beim Lesen der Pattern-Datei '{path}': {e}\n")
+        return []
     return pats
 
 # ---------- Kernverarbeitung ----------
@@ -540,7 +580,7 @@ def render_normal_view(patterns: List[PatternRec], sep: str, between: str, use_c
         out_lines.append(f"{pat.pid}\t{total}\t{words}")
     return "\n".join(out_lines) + ("\n" if out_lines else "")
 
-def render_alt_view(patterns: List[PatternRec], sep: str, between: str, use_color: bool) -> str:
+def render_alt_view(patterns: List[PatternRec], sep: str, between: str, use_color: bool, no_warn: bool = False) -> str:
     cols = shutil.get_terminal_size(fallback=(80, 24)).columns
     # Bei --color werden Chips ohne sichtbaren Separator gerendert → sep_len = 0
     sep_len = (0 if use_color else len(sep))
@@ -556,6 +596,12 @@ def render_alt_view(patterns: List[PatternRec], sep: str, between: str, use_colo
         words = pat.alts
         if not words or avail <= 0:
             lines.append(prefix + "\n"); continue
+
+        # Sicherheitsprüfung für sehr große Wortlisten
+        if len(words) > 10000:  # Begrenzung um Memory-Probleme zu vermeiden
+            words = words[:10000]
+            if not no_warn:
+                sys.stderr.write(f"[WARN] Wortliste für Pattern '{pat.pid}' auf 10000 Wörter begrenzt.\n")
 
         # 1) Passt alles? (kein between)
         full = (j_color(words) if use_color else j_plain(words))
@@ -612,17 +658,42 @@ def render_alt_view(patterns: List[PatternRec], sep: str, between: str, use_colo
 
 # ---------- Kommando & Header/Watch ----------
 def run_cmd(cmd: str, shell_path: str, timeout: Optional[float], no_warn: bool) -> str:
-    completed = subprocess.run(
-        [shell_path, "-c", cmd],
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=(subprocess.DEVNULL if no_warn else subprocess.PIPE),
-        text=True,
-        timeout=timeout,
-    )
-    if (not no_warn) and completed.returncode != 0 and completed.stderr:
-        sys.stderr.write(f"[WARN] Kommando Exit {completed.returncode}: {completed.stderr}\n")
-    return completed.stdout or ""
+    if not cmd or not cmd.strip():
+        return ""
+    
+    try:
+        # Validierung der Shell-Parameter
+        if not os.path.exists(shell_path):
+            sys.stderr.write(f"[ERROR] Shell '{shell_path}' nicht gefunden.\n")
+            return ""
+        
+        completed = subprocess.run(
+            [shell_path, "-c", cmd],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=(subprocess.DEVNULL if no_warn else subprocess.PIPE),
+            text=True,
+            timeout=timeout,
+        )
+        if (not no_warn) and completed.returncode != 0 and completed.stderr:
+            sys.stderr.write(f"[WARN] Kommando Exit {completed.returncode}: {completed.stderr}\n")
+        return completed.stdout or ""
+    except subprocess.TimeoutExpired:
+        if not no_warn:
+            sys.stderr.write(f"[WARN] Kommando Timeout nach {timeout}s: {cmd}\n")
+        return ""
+    except FileNotFoundError:
+        if not no_warn:
+            sys.stderr.write(f"[ERROR] Shell '{shell_path}' nicht gefunden.\n")
+        return ""
+    except PermissionError:
+        if not no_warn:
+            sys.stderr.write(f"[ERROR] Keine Berechtigung für Shell '{shell_path}'.\n")
+        return ""
+    except Exception as e:
+        if not no_warn:
+            sys.stderr.write(f"[ERROR] Unerwarteter Fehler beim Ausführen des Kommandos: {e}\n")
+        return ""
 
 def now_str(use_utc: bool) -> str:
     fmt = "%a %b %d %H:%M:%S %Z %Y"
@@ -652,16 +723,27 @@ class KeyPoller:
         self.old = None
         self.win = os.name == "nt"
         if self.enabled and not self.win:
-            import termios, tty
-            self.termios = termios; self.tty = tty
+            try:
+                import termios, tty
+                self.termios = termios; self.tty = tty
+            except ImportError:
+                self.enabled = False
+                sys.stderr.write("[WARN] termios/tty nicht verfügbar - Tastatur-Polling deaktiviert.\n")
     def __enter__(self):
         if self.enabled and not self.win:
-            self.old = self.termios.tcgetattr(sys.stdin.fileno())
-            self.tty.setcbreak(sys.stdin.fileno())
+            try:
+                self.old = self.termios.tcgetattr(sys.stdin.fileno())
+                self.tty.setcbreak(sys.stdin.fileno())
+            except Exception as e:
+                self.enabled = False
+                sys.stderr.write(f"[WARN] Tastatur-Polling Setup fehlgeschlagen: {e}\n")
         return self
     def __exit__(self, exc_type, exc, tb):
         if self.enabled and not self.win and self.old:
-            self.termios.tcsetattr(sys.stdin.fileno(), self.termios.TCSADRAIN, self.old)
+            try:
+                self.termios.tcsetattr(sys.stdin.fileno(), self.termios.TCSADRAIN, self.old)
+            except Exception:
+                pass  # Ignoriere Fehler beim Wiederherstellen
     def poll(self):
         if not self.enabled: return ""
         if self.win:
@@ -672,97 +754,136 @@ class KeyPoller:
                     ch = msvcrt.getwch()
                     s += ch
                 return s
+            except ImportError:
+                return ""
             except Exception:
                 return ""
         else:
-            r,_,_ = select.select([sys.stdin], [], [], 0)
-            if r:
-                try:
+            try:
+                r,_,_ = select.select([sys.stdin], [], [], 0)
+                if r:
                     return sys.stdin.read(1)
-                except Exception:
-                    return ""
+            except Exception:
+                pass
             return ""
 
 def main():
-    args = parse_args()
-    fs = unescape(args.fs)
-    sep = unescape(args.sep)
-    between = unescape(args.between)
-    cg_sep = unescape(args.cg_sep)
-    aux_sep = unescape(args.aux_sep)
-    flags = re.IGNORECASE if args.ignorecase else 0
+    try:
+        args = parse_args()
+        fs = unescape(args.fs)
+        sep = unescape(args.sep)
+        between = unescape(args.between)
+        cg_sep = unescape(args.cg_sep)
+        aux_sep = unescape(args.aux_sep)
+        flags = re.IGNORECASE if args.ignorecase else 0
 
-    patterns = load_patterns(args.patterns, fs, flags, args.maxw, args.lastw)
-    if not patterns:
-        sys.stderr.write("[ERROR] Keine gültigen Patterns geladen.\n"); sys.exit(2)
-
-    alt_mode = False  # Start im Normalmodus
-
-    def one_frame():
-        nonlocal alt_mode
-
-        # --- 0) Hauptkommando (nicht in Laufzeitmessung enthalten) ---
-        text = run_cmd(args.cmd, args.shell, args.timeout, args.no_warn) if args.cmd else sys.stdin.read()
-
-        # --- 1) Unsere Verarbeitungszeit starten ---
-        t_start = time.perf_counter()
-
-        # Normalansicht vorbereiten (inkl. Match/Transform)
-        normal_out_plain = process_text(text, patterns, args.maxw, sep, between, args.strip_punct, cg_sep)
-
-        # Inhalt je Modus (mit/ohne Farbe)
-        if alt_mode:
-            content = render_alt_view(patterns, sep, between, use_color=args.color)
-        else:
-            content = render_normal_view(patterns, sep, between, use_color=args.color) \
-                      if args.color else normal_out_plain
-
-        # Zwischensumme unserer Laufzeit bis hier
-        t_proc = time.perf_counter() - t_start
-
-        # --- 2) Aux-Kommando (wird NICHT mitgezählt) ---
-        frame_body = content
-        if args.auxcmd:
-            aux_to = args.aux_timeout if args.aux_timeout is not None else args.timeout
-            aux_out = run_cmd(args.auxcmd, args.shell, aux_to, args.no_warn)
-            t_after_aux = time.perf_counter()
-            sep_line = aux_sep + ("" if aux_sep.endswith("\n") else "\n")
-            aux_block = sep_line + (aux_out if aux_out.endswith("\n") else aux_out + "\n")
-            frame_body = (aux_block + content) if args.aux_before else (content + aux_block)
-            t_proc += (time.perf_counter() - t_after_aux)  # nur das Zusammenbauen addieren
-
-        # --- 3) Header bauen (mit ms) & atomar ausgeben ---
-        frame = frame_body
-        if args.clear:
-            left = (f"Every {args.interval:.1f}s: {args.cmd}" if args.cmd else "STDIN")
-            mode_tag = " ALT" if alt_mode else ""
-            ts = now_str(args.utc)
-            ms = int(round(t_proc * 1000.0))
-            right_parts = []
-            if args.header or mode_tag:
-                right_parts.append((args.header + mode_tag).strip())
-            right_parts.append(f"{ts} [{ms}ms]")
-            right = "  ".join([p for p in right_parts if p])
-            header = build_header_line(left, right, color=args.color_header) + "\n"
-            frame = "\x1b[H\x1b[2J" + header + frame_body
-
-        sys.stdout.write(frame); sys.stdout.flush()
-
-    if args.interval and args.interval > 0:
-        if not args.cmd:
-            sys.stderr.write("[ERROR] --interval erfordert --cmd (STDIN kann nicht periodisch gelesen werden).\n")
+        patterns = load_patterns(args.patterns, fs, flags, args.maxw, args.lastw)
+        if not patterns:
+            sys.stderr.write("[ERROR] Keine gültigen Patterns geladen.\n")
             sys.exit(2)
-        try:
-            with KeyPoller() as kp:
-                while True:
-                    keys = kp.poll()
-                    if keys and 'a' in keys: alt_mode = not alt_mode
-                    one_frame()
-                    time.sleep(args.interval)
-        except KeyboardInterrupt:
-            pass
-    else:
-        one_frame()
+
+        alt_mode = False  # Start im Normalmodus
+
+        def one_frame():
+            nonlocal alt_mode
+
+            # --- 0) Hauptkommando (nicht in Laufzeitmessung enthalten) ---
+            try:
+                if args.cmd:
+                    text = run_cmd(args.cmd, args.shell, args.timeout, args.no_warn)
+                else:
+                    # STDIN-Pipe-Modus: Lese bis EOF oder Prozess-Ende
+                    text = ""
+                    try:
+                        # Lese alle verfügbaren Zeilen sofort
+                        for line in sys.stdin:
+                            text += line
+                    except (BrokenPipeError, IOError):
+                        # Versorgender Prozess beendet
+                        if not args.no_warn:
+                            sys.stderr.write("[INFO] Versorgender Prozess beendet.\n")
+                        # text bleibt leer oder enthält bereits gelesene Zeilen
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                if not args.no_warn:
+                    sys.stderr.write(f"[ERROR] Fehler beim Lesen der Eingabe: {e}\n")
+                text = ""
+
+            # --- 1) Unsere Verarbeitungszeit starten ---
+            t_start = time.perf_counter()
+
+            # Normalansicht vorbereiten (inkl. Match/Transform)
+            normal_out_plain = process_text(text, patterns, args.maxw, sep, between, args.strip_punct, cg_sep)
+
+            # Inhalt je Modus (mit/ohne Farbe)
+            if alt_mode:
+                content = render_alt_view(patterns, sep, between, use_color=args.color, no_warn=args.no_warn)
+            else:
+                content = render_normal_view(patterns, sep, between, use_color=args.color) \
+                          if args.color else normal_out_plain
+
+            # Zwischensumme unserer Laufzeit bis hier
+            t_proc = time.perf_counter() - t_start
+
+            # --- 2) Aux-Kommando (wird NICHT mitgezählt) ---
+            frame_body = content
+            if args.auxcmd:
+                aux_to = args.aux_timeout if args.aux_timeout is not None else args.timeout
+                aux_out = run_cmd(args.auxcmd, args.shell, aux_to, args.no_warn)
+                t_after_aux = time.perf_counter()
+                sep_line = aux_sep + ("" if aux_sep.endswith("\n") else "\n")
+                aux_block = sep_line + (aux_out if aux_out.endswith("\n") else aux_out + "\n")
+                frame_body = (aux_block + content) if args.aux_before else (content + aux_block)
+                t_proc += (time.perf_counter() - t_after_aux)  # nur das Zusammenbauen addieren
+
+            # --- 3) Header bauen (mit ms) & atomar ausgeben ---
+            frame = frame_body
+            if args.clear:
+                left = (f"Every {args.interval:.1f}s: {args.cmd}" if args.cmd else "STDIN")
+                mode_tag = " ALT" if alt_mode else ""
+                ts = now_str(args.utc)
+                ms = int(round(t_proc * 1000.0))
+                right_parts = []
+                if args.header or mode_tag:
+                    right_parts.append((args.header + mode_tag).strip())
+                right_parts.append(f"{ts} [{ms}ms]")
+                right = "  ".join([p for p in right_parts if p])
+                header = build_header_line(left, right, color=args.color_header) + "\n"
+                frame = "\x1b[H\x1b[2J" + header + frame_body
+
+            try:
+                sys.stdout.write(frame)
+                sys.stdout.flush()
+            except (BrokenPipeError, IOError):
+                # Handle broken pipe gracefully
+                sys.exit(0)
+
+        if args.interval and args.interval > 0:
+            if not args.cmd:
+                sys.stderr.write("[ERROR] --interval erfordert --cmd (STDIN kann nicht periodisch gelesen werden).\n")
+                sys.exit(2)
+            try:
+                with KeyPoller() as kp:
+                    while True:
+                        keys = kp.poll()
+                        if keys and 'a' in keys: alt_mode = not alt_mode
+                        one_frame()
+                        time.sleep(args.interval)
+            except KeyboardInterrupt:
+                sys.stdout.write("\n")  # Neue Zeile nach Ctrl+C
+            except Exception as e:
+                if not args.no_warn:
+                    sys.stderr.write(f"[ERROR] Unerwarteter Fehler im Watch-Modus: {e}\n")
+                sys.exit(1)
+        else:
+            one_frame()
+            
+    except KeyboardInterrupt:
+        sys.exit(0)
+    except Exception as e:
+        sys.stderr.write(f"[ERROR] Kritischer Fehler: {e}\n")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

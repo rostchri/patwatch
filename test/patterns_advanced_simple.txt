@@ -1,0 +1,13 @@
+# Log-Level Patterns
+ERROR	ERROR	.*	\1	upper
+INFO	INFO	.*	\1	lower
+WARN	WARN	.*	\1	title
+DEBUG	DEBUG	.*	\1	swapcase
+
+# Service Patterns
+UserService	\[UserService\]	\w+	\1	upper
+DatabaseService	\[DatabaseService\]	\w+	\1	lower
+PaymentService	\[PaymentService\]	\w+	\1	title
+
+# Email Pattern
+Email	email	\w+@\w+\.\w+	\1	lower

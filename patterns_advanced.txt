@@ -1,0 +1,18 @@
+# Log-Level Patterns
+ERROR	ERROR	.*	\1	upper
+INFO	INFO	.*	\1	lower
+WARN	WARN	.*	\1	title
+DEBUG	DEBUG	.*	\1	swapcase
+
+# Service Patterns mit Wort-Extraktion
+UserService	\[UserService\]	\w+	\1	upper
+DatabaseService	\[DatabaseService\]	\w+	\1	lower
+PaymentService	\[PaymentService\]	\w+	\1	title
+
+# Email Patterns
+Email	email	\w+@\w+\.\w+	\1	lower
+Transaction	transaction_id=(\w+)	\1	\1	upper
+Order	order_id=(\w+)	\1	\1	lower
+
+# IP Address Pattern
+IP	IP=(\d+\.\d+\.\d+\.\d+)	\1	\1	replace_str(\.)(_)

@@ -1,0 +1,4 @@
+ERROR	ERROR	.*	\1	upper
+INFO	INFO	.*	\1	lower
+WARN	WARN	.*	\1	title
+DEBUG	DEBUG	.*	\1	swapcase

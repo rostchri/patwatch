@@ -1,0 +1,16 @@
+# Log-Level Patterns mit Wort-Extraktion
+ERROR	ERROR	\w+	\1	upper
+INFO	INFO	\w+	\1	lower
+WARN	WARN	\w+	\1	title
+DEBUG	DEBUG	\w+	\1	swapcase
+
+# Service Patterns mit Wort-Extraktion
+UserService	\[UserService\]	\w+	\1	upper
+DatabaseService	\[DatabaseService\]	\w+	\1	lower
+PaymentService	\[PaymentService\]	\w+	\1	title
+
+# Email Pattern
+Email	email	\w+@\w+\.\w+	\1	lower
+
+# Letzte Wörter aus Zeilen
+LastWord	.*	\w+$	\1	upper
