@@ -94,6 +94,9 @@ repeatcolor:
 	@echo ""
 	@echo "Tastatur-Steuerung:"
 	@echo "  - Taste 'a': Wechsel zwischen Normal- und Alternativansicht"
+	@echo "  - Taste 'q': Programm beenden"
+	@echo "  - Taste '+': Intervall um 5s erhöhen"
+	@echo "  - Taste '-': Intervall um 5s verringern (min. 1s)"
 	@echo "  - Ctrl+C: Beenden"
 	@echo ""
 	@echo "Starte in 3 Sekunden..."
@@ -116,6 +119,9 @@ piperepeatcolor:
 	@echo ""
 	@echo "Tastatur-Steuerung:"
 	@echo "  - Taste 'a': Wechsel zwischen Normal- und Alternativansicht"
+	@echo "  - Taste 'q': Programm beenden"
+	@echo "  - Taste '+': Intervall um 5s erhöhen"
+	@echo "  - Taste '-': Intervall um 5s verringern (min. 1s)"
 	@echo "  - Ctrl+C: Beenden"
 	@echo ""
 	@echo "Starte in 3 Sekunden..."
@@ -138,11 +144,14 @@ cmdrepeatcolor:
 	@echo ""
 	@echo "Tastatur-Steuerung:"
 	@echo "  - Taste 'a': Wechsel zwischen Normal- und Alternativansicht"
+	@echo "  - Taste 'q': Programm beenden"
+	@echo "  - Taste '+': Intervall um 5s erhöhen"
+	@echo "  - Taste '-': Intervall um 5s verringern (min. 1s)"
 	@echo "  - Ctrl+C: Beenden"
 	@echo ""
 	@echo "Starte in 3 Sekunden..."
 	@sleep 3
-	$(PYTHON) $(SCRIPT) -p $(TEST_DIR)/patterns_complex_color_fixed.txt -c "$(PYTHON) $(TEST_DIR)/dynamic_log_generator.py --timeout 0 | head -5" -t 1 --clear --color --maxw 5 --lastw 3 --color-header
+	$(PYTHON) $(SCRIPT) -p $(TEST_DIR)/patterns_complex_color_fixed.txt -c "$(PYTHON) $(TEST_DIR)/dynamic_log_generator.py --timeout 0 | head -5" -t 1 --clear --color --header "TEST" --maxw 5 --lastw 3 --color-header
 
 # Pipe-Test mit unendlichem Generator
 .PHONY: piperepeatcolorinfinite
@@ -160,6 +169,9 @@ piperepeatcolorinfinite:
 	@echo ""
 	@echo "Tastatur-Steuerung:"
 	@echo "  - Taste 'a': Wechsel zwischen Normal- und Alternativansicht"
+	@echo "  - Taste 'q': Programm beenden"
+	@echo "  - Taste '+': Intervall um 5s erhöhen"
+	@echo "  - Taste '-': Intervall um 5s verringern (min. 1s)"
 	@echo "  - Ctrl+C: Beenden"
 	@echo ""
 	@echo "Starte in 3 Sekunden..."

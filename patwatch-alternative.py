@@ -760,9 +760,19 @@ class KeyPoller:
                 return ""
         else:
             try:
-                r,_,_ = select.select([sys.stdin], [], [], 0)
-                if r:
-                    return sys.stdin.read(1)
+                s = ""
+                # Lese alle verfügbaren Zeichen
+                while True:
+                    r,_,_ = select.select([sys.stdin], [], [], 0)
+                    if r:
+                        ch = sys.stdin.read(1)
+                        if ch:  # Nicht leer
+                            s += ch
+                        else:
+                            break
+                    else:
+                        break
+                return s
             except Exception:
                 pass
             return ""
@@ -783,9 +793,46 @@ def main():
             sys.exit(2)
 
         alt_mode = False  # Start im Normalmodus
+        current_interval = args.interval if args.interval else 0  # Aktuelles Intervall
+        
+        # Cache für die letzten verarbeiteten Daten
+        last_text = ""
+        last_normal_content = ""
+        last_alt_content = ""
+
+        def update_display():
+            """Nur die Anzeige aktualisieren, ohne neue Daten zu laden"""
+            nonlocal alt_mode, current_interval
+            
+            # Verwende gecachte Inhalte
+            if alt_mode:
+                content = last_alt_content
+            else:
+                content = last_normal_content
+            
+            # Header bauen & ausgeben
+            frame = content
+            if args.clear:
+                left = (f"Every {current_interval:.1f}s: {args.cmd}" if args.cmd else "STDIN")
+                mode_tag = " [ALT]" if alt_mode else ""
+                ts = now_str(args.utc)
+                right_parts = []
+                if args.header or mode_tag:
+                    right_parts.append((args.header + mode_tag).strip())
+                right_parts.append(f"{ts}")
+                right = "  ".join([p for p in right_parts if p])
+                header = build_header_line(left, right, color=args.color_header) + "\n"
+                frame = "\x1b[H\x1b[2J" + header + content
+
+            try:
+                sys.stdout.write(frame)
+                sys.stdout.flush()
+            except (BrokenPipeError, IOError):
+                # Handle broken pipe gracefully
+                sys.exit(0)
 
         def one_frame():
-            nonlocal alt_mode
+            nonlocal alt_mode, current_interval, last_text, last_normal_content, last_alt_content
 
             # --- 0) Hauptkommando (nicht in Laufzeitmessung enthalten) ---
             try:
@@ -816,12 +863,16 @@ def main():
             # Normalansicht vorbereiten (inkl. Match/Transform)
             normal_out_plain = process_text(text, patterns, args.maxw, sep, between, args.strip_punct, cg_sep)
 
-            # Inhalt je Modus (mit/ohne Farbe)
+            # Beide Ansichten vorbereiten und cachen
+            last_normal_content = render_normal_view(patterns, sep, between, use_color=args.color) \
+                                  if args.color else normal_out_plain
+            last_alt_content = render_alt_view(patterns, sep, between, use_color=args.color, no_warn=args.no_warn)
+            
+            # Aktuelle Ansicht wählen
             if alt_mode:
-                content = render_alt_view(patterns, sep, between, use_color=args.color, no_warn=args.no_warn)
+                content = last_alt_content
             else:
-                content = render_normal_view(patterns, sep, between, use_color=args.color) \
-                          if args.color else normal_out_plain
+                content = last_normal_content
 
             # Zwischensumme unserer Laufzeit bis hier
             t_proc = time.perf_counter() - t_start
@@ -840,8 +891,8 @@ def main():
             # --- 3) Header bauen (mit ms) & atomar ausgeben ---
             frame = frame_body
             if args.clear:
-                left = (f"Every {args.interval:.1f}s: {args.cmd}" if args.cmd else "STDIN")
-                mode_tag = " ALT" if alt_mode else ""
+                left = (f"Every {current_interval:.1f}s: {args.cmd}" if args.cmd else "STDIN")
+                mode_tag = " [ALT]" if alt_mode else ""
                 ts = now_str(args.utc)
                 ms = int(round(t_proc * 1000.0))
                 right_parts = []
@@ -866,10 +917,43 @@ def main():
             try:
                 with KeyPoller() as kp:
                     while True:
-                        keys = kp.poll()
-                        if keys and 'a' in keys: alt_mode = not alt_mode
-                        one_frame()
-                        time.sleep(args.interval)
+                        # Kontinuierliche Tastaturbehandlung während des Wartens
+                        start_time = time.time()
+                        while time.time() - start_time < current_interval:
+                            # Tastatur alle 50ms prüfen
+                            keys = kp.poll()
+                            if keys:
+                                # Verarbeite alle Zeichen im String
+                                for key in keys:
+                                    if key == 'a': 
+                                        alt_mode = not alt_mode
+                                        # Sofort nur die Anzeige umschalten (ohne neue Daten)
+                                        update_display()
+                                    elif key == '+':
+                                        # Intervall um 5 Sekunden erhöhen
+                                        current_interval += 5.0
+                                        # Sofort nur die Anzeige aktualisieren
+                                        update_display()
+                                    elif key == '-':
+                                        # Intervall um 5 Sekunden verringern (Minimum 1s)
+                                        new_interval = current_interval - 5.0
+                                        if new_interval >= 1.0:
+                                            current_interval = new_interval
+                                            # Sofort nur die Anzeige aktualisieren
+                                            update_display()
+                                    elif key == 'q':
+                                        # Programm beenden
+                                        sys.exit(0)
+                                
+                                # Direkt zur nächsten Iteration, ohne weiteres Warten
+                                break
+                            
+                            # Kurz warten (50ms) bevor nächste Tastaturprüfung
+                            time.sleep(0.05)
+                        
+                        # Wenn keine Tasten gedrückt wurden, normales Update
+                        if time.time() - start_time >= current_interval:
+                            one_frame()
             except KeyboardInterrupt:
                 sys.stdout.write("\n")  # Neue Zeile nach Ctrl+C
             except Exception as e:
