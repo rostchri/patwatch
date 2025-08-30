@@ -279,7 +279,7 @@ class PatternRec:
         self.word_re = word_re
         self.tmpl = tmpl
         self.transforms = transforms  # 5. Spalte (Pipeline)
-        self.orig_ref = tmpl if tmpl else ""  # Ursprüngliche Referenz aus Spalte 5
+        self.orig_ref = pid  # Ursprüngliche Referenz ist die Pattern-ID
         self.count = 0
         self.head: List[str] = []
         self.head_keys: List[str] = []   # Farb-Key je Head-Wort (Altwort dominiert)
