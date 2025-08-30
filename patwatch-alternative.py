@@ -444,7 +444,7 @@ def _color_chip(word: str) -> str:
 
 def colorize_join(words: list[str]) -> str:
     chips = [_color_chip(w) for w in words if w]
-    return " ".join(chips)
+    return "".join(chips)
 
 # ---------- Rendering (Normal & Alt) ----------
 def render_normal_view(patterns: List[PatternRec], sep: str, between: str, use_color: bool) -> str:
@@ -492,7 +492,8 @@ def render_normal_view(patterns: List[PatternRec], sep: str, between: str, use_c
 
 def render_alt_view(patterns: List[PatternRec], sep: str, between: str, use_color: bool) -> str:
     cols = shutil.get_terminal_size(fallback=(80, 24)).columns
-    sep_len = (1 if use_color else len(sep))
+    # Bei --color werden Chips ohne sichtbaren Separator gerendert → sep_len = 0
+    sep_len = (0 if use_color else len(sep))
     between_len = len(between)
 
     def j_plain(ws): return sep.join(ws) if ws else ""
@@ -599,7 +600,7 @@ class KeyPoller:
     def __init__(self):
         self.enabled = sys.stdin.isatty()
         self.old = None
-               self.win = os.name == "nt"
+        self.win = os.name == "nt"
         if self.enabled and not self.win:
             import termios, tty
             self.termios = termios; self.tty = tty
